@@ -47,6 +47,14 @@ NOW_PLAYING_TITLE_SCROLL_INTERVAL_S = 0.12
 NOW_PLAYING_TITLE_SCROLL_STEP_PX = 1
 NOW_PLAYING_TITLE_SCROLL_GAP_PX = 24
 NOW_PLAYING_ART_SIZE = 96
+NOW_PLAYING_LEFT_MARGIN = 8
+NOW_PLAYING_ART_TOP = 8
+NOW_PLAYING_PROGRESS_TOP_GAP = 8
+NOW_PLAYING_TIME_TOP_GAP = 11
+NOW_PLAYING_TITLE_TOP_GAP = 13
+NOW_PLAYING_VOLUME_TOP_GAP = 20
+NOW_PLAYING_CONTROLS_TOP_GAP = 24
+VOLUME_SLIDER_KNOB_CENTER_Y_OFFSET = 6
 FOLDER_ART_NAMES = (
     "cover.jpg",
     "cover.jpeg",
@@ -648,6 +656,75 @@ def draw_volume_icon(draw, x, y, volume_level, is_muted):
             draw_dashed_arc(bbox, wave_start, wave_end)
 
 
+def _volume_slider_track_bounds(x, y, width):
+    left_icon_w = 10
+    right_icon_w = 12
+    edge_pad = 4
+    track_x0 = int(x) + left_icon_w + edge_pad
+    track_x1 = int(x) + int(width) - right_icon_w - edge_pad - 1
+    if track_x1 <= track_x0:
+        track_x1 = track_x0 + 1
+    center_y = int(y) + VOLUME_SLIDER_KNOB_CENTER_Y_OFFSET
+    return track_x0, track_x1, center_y
+
+
+def _volume_slider_knob_x(x, y, width, volume_level, is_muted=False):
+    level = 0 if is_muted else clamp_volume_level(volume_level)
+    track_x0, track_x1, _ = _volume_slider_track_bounds(x, y, width)
+    span = max(1, track_x1 - track_x0)
+    return track_x0 + int(round((level / 10.0) * span))
+
+
+def draw_volume_slider(draw, x, y, width, volume_level, is_muted):
+    """Draw a compact horizontal volume slider with left/right speaker glyphs."""
+    x = int(x)
+    y = int(y)
+    width = max(32, int(width))
+
+    # Left speaker icon.
+    draw.polygon(
+        [
+            (x, y + 4),
+            (x + 2, y + 4),
+            (x + 5, y + 2),
+            (x + 5, y + 10),
+            (x + 2, y + 8),
+            (x, y + 8),
+        ],
+        outline=0,
+        fill=255,
+    )
+
+    # Right speaker icon + waves.
+    right_x = x + width - 10
+    draw.polygon(
+        [
+            (right_x, y + 4),
+            (right_x + 2, y + 4),
+            (right_x + 5, y + 2),
+            (right_x + 5, y + 10),
+            (right_x + 2, y + 8),
+            (right_x, y + 8),
+        ],
+        outline=0,
+        fill=255,
+    )
+    draw.arc((right_x + 5, y + 3, right_x + 9, y + 9), -45, 45, fill=0)
+    draw.arc((right_x + 6, y + 2, right_x + 12, y + 10), -45, 45, fill=0)
+
+    track_x0, track_x1, center_y = _volume_slider_track_bounds(x, y, width)
+    draw.rectangle((track_x0, center_y - 1, track_x1, center_y + 1), outline=0, fill=255)
+
+    knob_x = _volume_slider_knob_x(x, y, width, volume_level, is_muted=is_muted)
+    if knob_x > track_x0:
+        draw.line((track_x0 + 1, center_y, knob_x, center_y), fill=0, width=1)
+    draw.ellipse((knob_x - 4, center_y - 4, knob_x + 4, center_y + 4), outline=0, fill=255)
+
+    if is_muted:
+        draw.line((x + 1, y + 1, x + 8, y + 11), fill=0)
+        draw.line((x + 1, y + 11, x + 8, y + 1), fill=0)
+
+
 def draw_rounded_box(draw, x0, y0, x1, y1, fill=255, outline=None, radius=4, width=1):
     kwargs = {}
     if fill is not None:
@@ -1179,25 +1256,13 @@ def render_now_playing(
     draw = ImageDraw.Draw(image)
     _, item_font, hint_font = fonts
 
-    status_x = epd.width - 31
-    draw_battery_icon(
-        draw,
-        status_x,
-        1,
-        status.battery_percent,
-        status.is_charging,
-        charge_anim_frame=charge_anim_frame,
-    )
-    draw_volume_icon(draw, status_x, 13, status.volume_level, status.is_muted)
-    draw.line((0, 26, epd.width - 1, 26), fill=0)
-
-    left = 8
+    left = NOW_PLAYING_LEFT_MARGIN
     max_width = epd.width - (left * 2)
     state = player.state()
 
     progress_s, progress_duration_s = player.playback_progress()
     art_left = (epd.width - NOW_PLAYING_ART_SIZE) // 2
-    art_top = 32
+    art_top = NOW_PLAYING_ART_TOP
     art_right = art_left + NOW_PLAYING_ART_SIZE - 1
     art_bottom = art_top + NOW_PLAYING_ART_SIZE - 1
 
@@ -1247,17 +1312,17 @@ def render_now_playing(
     draw.rectangle((art_left, art_top, art_right, art_bottom), outline=0)
 
     progress_x = left
-    progress_y = art_bottom + 10
+    progress_y = art_bottom + NOW_PLAYING_PROGRESS_TOP_GAP
     progress_w = epd.width - (left * 2)
     draw_progress_bar(draw, progress_x, progress_y, progress_w, 8, progress_bar_ratio)
 
-    time_y = progress_y + 11
+    time_y = progress_y + NOW_PLAYING_TIME_TOP_GAP
     draw.text((progress_x, time_y), elapsed_label, font=hint_font, fill=0)
     duration_w = measure_text_width(duration_label, hint_font)
     draw.text((progress_x + progress_w - duration_w, time_y), duration_label, font=hint_font, fill=0)
 
     song_artist = f"{song_name} - {artist_name}"
-    song_line_y = time_y + 14
+    song_line_y = time_y + NOW_PLAYING_TITLE_TOP_GAP
     draw_scrolling_text(
         image,
         item_font,
@@ -1269,7 +1334,9 @@ def render_now_playing(
         scroll_px=song_scroll_px,
         gap_px=NOW_PLAYING_TITLE_SCROLL_GAP_PX,
     )
-    controls_y = time_y + 40
+    volume_y = song_line_y + NOW_PLAYING_VOLUME_TOP_GAP
+    draw_volume_slider(draw, left, volume_y, max_width, status.volume_level, status.is_muted)
+    controls_y = volume_y + NOW_PLAYING_CONTROLS_TOP_GAP
     draw_now_playing_icon_controls(
         draw,
         left,
