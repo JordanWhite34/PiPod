@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import tempfile
+import os
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 from PIL import Image
 
@@ -28,9 +30,11 @@ from pipod_runtime import (
     _volume_slider_knob_x,
     build_music_index,
     load_fonts,
+    parse_input_token,
     render_now_playing,
     run_pipod_loop,
 )
+from input_provider import CombinedEventProvider, GpioFiveWayConfig, GpioFiveWayInput
 from simulator_adapters import FakeEPD, FixtureLibrary, MockPlayer
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -211,6 +215,122 @@ class SimulatorAdapterTests(unittest.TestCase):
         )
 
 
+class InputParsingTests(unittest.TestCase):
+    def test_parse_input_token_supports_left_and_right(self):
+        self.assertEqual(parse_input_token("left"), "LEFT")
+        self.assertEqual(parse_input_token("right"), "RIGHT")
+
+    def test_parse_input_token_keeps_existing_shortcuts(self):
+        self.assertEqual(parse_input_token("r"), "RESCAN_LIBRARY")
+        self.assertEqual(parse_input_token("u"), "UP")
+        self.assertEqual(parse_input_token("d"), "DOWN")
+        self.assertEqual(parse_input_token("s"), "SELECT")
+        self.assertEqual(parse_input_token("b"), "BACK")
+
+
+class FakeButton:
+    def __init__(self, pin: int, pull_up: bool, bounce_time: float):
+        self.pin = pin
+        self.pull_up = pull_up
+        self.bounce_time = bounce_time
+        self.when_pressed = None
+        self.closed = False
+
+    def press(self):
+        if callable(self.when_pressed):
+            self.when_pressed()
+
+    def close(self):
+        self.closed = True
+
+
+class GpioInputProviderTests(unittest.TestCase):
+    def test_gpio_five_way_config_from_env_defaults(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "PIPOD_GPIO_ENABLED": "",
+                "PIPOD_GPIO_UP_PIN": "",
+                "PIPOD_GPIO_DOWN_PIN": "",
+                "PIPOD_GPIO_LEFT_PIN": "",
+                "PIPOD_GPIO_RIGHT_PIN": "",
+                "PIPOD_GPIO_SELECT_PIN": "",
+                "PIPOD_GPIO_DEBOUNCE_MS": "",
+                "PIPOD_GPIO_PULL_UP": "",
+            },
+        ):
+            config = GpioFiveWayConfig.from_env()
+        self.assertEqual(config.up_pin, 6)
+        self.assertEqual(config.down_pin, 19)
+        self.assertEqual(config.left_pin, 5)
+        self.assertEqual(config.right_pin, 26)
+        self.assertEqual(config.select_pin, 13)
+        self.assertEqual(config.debounce_ms, 70)
+        self.assertTrue(config.pull_up)
+
+    def test_gpio_input_enqueues_events_and_closes_buttons(self):
+        created: list[FakeButton] = []
+
+        def fake_factory(pin: int, pull_up: bool, bounce_time: float):
+            button = FakeButton(pin=pin, pull_up=pull_up, bounce_time=bounce_time)
+            created.append(button)
+            return button
+
+        config = GpioFiveWayConfig(
+            enabled=True,
+            up_pin=6,
+            down_pin=19,
+            left_pin=5,
+            right_pin=26,
+            select_pin=13,
+            debounce_ms=70,
+            pull_up=True,
+        )
+        gpio_input = GpioFiveWayInput(config=config, button_factory=fake_factory)
+
+        for button in created:
+            self.assertAlmostEqual(button.bounce_time, 0.07, places=6)
+            self.assertTrue(button.pull_up)
+
+        for button in created:
+            button.press()
+        self.assertEqual(
+            [gpio_input.poll_nonblocking() for _ in range(5)],
+            ["UP", "DOWN", "LEFT", "RIGHT", "SELECT"],
+        )
+        self.assertIsNone(gpio_input.poll_nonblocking())
+
+        gpio_input.close()
+        self.assertTrue(all(button.closed for button in created))
+
+    def test_combined_event_provider_prioritizes_gpio_queue(self):
+        created: list[FakeButton] = []
+
+        def fake_factory(pin: int, pull_up: bool, bounce_time: float):
+            button = FakeButton(pin=pin, pull_up=pull_up, bounce_time=bounce_time)
+            created.append(button)
+            return button
+
+        gpio_input = GpioFiveWayInput(GpioFiveWayConfig(), button_factory=fake_factory)
+        created[2].press()  # LEFT
+
+        calls: list[float] = []
+
+        def keyboard_provider(timeout_s: float):
+            calls.append(timeout_s)
+            return "UP"
+
+        combined = CombinedEventProvider(keyboard_provider, gpio_input=gpio_input)
+        self.assertEqual(combined(0.1), "LEFT")
+        self.assertEqual(calls, [])
+
+        self.assertEqual(combined(0.1), "UP")
+        self.assertEqual(calls, [0.1])
+
+        combined.close()
+        self.assertTrue(all(button.closed for button in created))
+
+
 class ScriptedEventProvider:
     def __init__(self, events: list[str]):
         self._events = list(events)
@@ -339,6 +459,7 @@ class MusicBrowserTests(unittest.TestCase):
         )
         self.assertEqual(stats["final_view"], "music_list")
         self.assertIsNotNone(player.current_track_path())
+        self.assertTrue(player.state().is_shuffle)
 
     def test_back_navigation_returns_to_menu(self):
         stats, _ = self._run_scripted(
@@ -353,6 +474,59 @@ class MusicBrowserTests(unittest.TestCase):
         )
         self.assertEqual(stats["final_view"], "menu")
         self.assertEqual(stats["selected_menu_item"], "Music")
+
+    def test_right_alias_select_enters_music_root(self):
+        stats, _ = self._run_scripted(["RIGHT", "QUIT"])
+        self.assertEqual(stats["final_view"], "music_root")
+
+    def test_left_alias_back_navigation_returns_to_menu(self):
+        stats, _ = self._run_scripted(
+            [
+                "RIGHT",  # Music root
+                "DOWN",  # Artists
+                "RIGHT",  # enter artists
+                "LEFT",  # back to music root
+                "LEFT",  # back to menu
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "menu")
+        self.assertEqual(stats["selected_menu_item"], "Music")
+
+    def test_left_alias_back_from_now_playing_returns_menu(self):
+        stats, _ = self._run_scripted(
+            [
+                "DOWN",  # Now Playing
+                "RIGHT",  # enter now playing via alias
+                "LEFT",  # back to menu via alias
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "menu")
+
+    def test_right_alias_select_activates_now_playing_focus(self):
+        stats, player = self._run_scripted(
+            [
+                "DOWN",  # Now Playing
+                "RIGHT",  # enter now playing
+                "RIGHT",  # activate focused PLAY_PAUSE
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "now_playing")
+        self.assertIsNotNone(player.current_track_path())
+        self.assertFalse(player.state().is_shuffle)
+
+    def test_play_pause_from_empty_queue_starts_random_without_shuffle(self):
+        stats, player = self._run_scripted(
+            [
+                "PLAY_PAUSE",
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "menu")
+        self.assertIsNotNone(player.current_track_path())
+        self.assertFalse(player.state().is_shuffle)
 
 
 if __name__ == "__main__":

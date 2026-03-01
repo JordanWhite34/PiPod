@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from library import MusicLibrary
+from input_provider import CombinedEventProvider, GpioFiveWayConfig, GpioFiveWayInput
 from pipod_runtime import (
     LIBRARY_DB_PATH,
     MUSIC_DIR,
@@ -36,6 +37,8 @@ def main():
     epd = None
     library = None
     player = None
+    event_provider = read_key_event
+    combined_input = None
     try:
         fonts = load_fonts()
         status_plumbing = StatusPlumbing()
@@ -44,6 +47,28 @@ def main():
         library = MusicLibrary(music_root=MUSIC_DIR, db_path=LIBRARY_DB_PATH)
         player = MusicPlayer()
         sync_audio_output(status, player)
+
+        gpio_config = GpioFiveWayConfig.from_env()
+        if gpio_config.enabled:
+            try:
+                gpio_input = GpioFiveWayInput(gpio_config)
+            except Exception as exc:
+                logging.warning("GPIO input unavailable; using keyboard only: %s", exc)
+            else:
+                combined_input = CombinedEventProvider(read_key_event, gpio_input=gpio_input)
+                event_provider = combined_input
+                logging.info(
+                    "GPIO input enabled (BCM: up=%d down=%d left=%d right=%d select=%d, debounce=%dms, pull_up=%s)",
+                    gpio_config.up_pin,
+                    gpio_config.down_pin,
+                    gpio_config.left_pin,
+                    gpio_config.right_pin,
+                    gpio_config.select_pin,
+                    gpio_config.debounce_ms,
+                    gpio_config.pull_up,
+                )
+        else:
+            logging.info("GPIO input disabled by PIPOD_GPIO_ENABLED=0; keyboard only")
 
         epd = epd2in13_V4.EPD()
 
@@ -60,7 +85,7 @@ def main():
             display=epd,
             library=library,
             player=player,
-            event_provider=read_key_event,
+            event_provider=event_provider,
             fonts=fonts,
             status_plumbing=status_plumbing,
         )
@@ -72,6 +97,8 @@ def main():
     except KeyboardInterrupt:
         logging.info("Interrupted by user")
     finally:
+        if combined_input is not None:
+            combined_input.close()
         if library is not None:
             library.close()
         if player is not None:

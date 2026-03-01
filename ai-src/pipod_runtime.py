@@ -147,6 +147,32 @@ NOW_PLAYING_FOCUSABLE = (
     "LOOP",
 )
 
+INPUT_TOKEN_MAPPING = {
+    "u": "UP",
+    "up": "UP",
+    "d": "DOWN",
+    "down": "DOWN",
+    "s": "SELECT",
+    "select": "SELECT",
+    "left": "LEFT",
+    "right": "RIGHT",
+    "b": "BACK",
+    "q": "QUIT",
+    "quit": "QUIT",
+    "v+": "VOL_UP",
+    "+": "VOL_UP",
+    "v-": "VOL_DOWN",
+    "-": "VOL_DOWN",
+    "b+": "BAT_UP",
+    "b-": "BAT_DOWN",
+    "m": "TOGGLE_MUTE",
+    "c": "TOGGLE_CHARGE",
+    "p": "PLAY_PAUSE",
+    "n": "NEXT_TRACK",
+    "k": "PREV_TRACK",
+    "r": "RESCAN_LIBRARY",
+}
+
 
 @dataclass
 class RunConfig:
@@ -1506,32 +1532,36 @@ def sync_audio_output(status, player):
 def handle_menu_action(menu_item, library, player):
     """Execute selected menu action. Return True when state changed."""
     if menu_item == "Shuffle All":
-        tracks = library.random_tracks()
-        if not tracks:
-            library.scan()
-            tracks = library.random_tracks()
-        if not tracks:
-            return False
-
-        started = player.set_queue(
-            [track.path for track in tracks],
-            shuffle=True,
-            autoplay=True,
-        )
-        if started:
-            return True
-
-        library.scan()
-        tracks = library.random_tracks()
-        if not tracks:
-            return False
-        return player.set_queue(
-            [track.path for track in tracks],
-            shuffle=True,
-            autoplay=True,
-        )
+        return _start_random_queue(library, player, shuffle=True)
 
     return False
+
+
+def _start_random_queue(library, player, shuffle: bool) -> bool:
+    tracks = library.random_tracks()
+    if not tracks:
+        library.scan()
+        tracks = library.random_tracks()
+    if not tracks:
+        return False
+
+    started = player.set_queue(
+        [track.path for track in tracks],
+        shuffle=shuffle,
+        autoplay=True,
+    )
+    if started:
+        return True
+
+    library.scan()
+    tracks = library.random_tracks()
+    if not tracks:
+        return False
+    return player.set_queue(
+        [track.path for track in tracks],
+        shuffle=shuffle,
+        autoplay=True,
+    )
 
 
 def render_menu(
@@ -1717,7 +1747,7 @@ def render_now_playing(
         draw.rectangle((art_left, art_top, art_right, art_bottom), outline=0, fill=255)
         draw.text((art_left + 12, art_top + 40), "NO COVER", font=item_font, fill=0)
         song_name = "Nothing queued"
-        artist_name = "Use Shuffle All"
+        artist_name = "Press Play"
     else:
         metadata = library.track_by_path(state.current_track)
         if metadata is not None:
@@ -1802,31 +1832,22 @@ def read_key_event(timeout_s=0.1):
     raw = sys.stdin.readline()
     if raw == "":
         return None
-    raw = raw.strip().lower()
-    mapping = {
-        "u": "UP",
-        "up": "UP",
-        "d": "DOWN",
-        "down": "DOWN",
-        "s": "SELECT",
-        "select": "SELECT",
-        "b": "BACK",
-        "q": "QUIT",
-        "quit": "QUIT",
-        "v+": "VOL_UP",
-        "+": "VOL_UP",
-        "v-": "VOL_DOWN",
-        "-": "VOL_DOWN",
-        "b+": "BAT_UP",
-        "b-": "BAT_DOWN",
-        "m": "TOGGLE_MUTE",
-        "c": "TOGGLE_CHARGE",
-        "p": "PLAY_PAUSE",
-        "n": "NEXT_TRACK",
-        "k": "PREV_TRACK",
-        "r": "RESCAN_LIBRARY",
-    }
-    return mapping.get(raw)
+    return parse_input_token(raw)
+
+
+def parse_input_token(raw: str | None) -> str | None:
+    text = str(raw or "").strip().lower()
+    if not text:
+        return None
+    return INPUT_TOKEN_MAPPING.get(text)
+
+
+def normalize_navigation_event_alias(event: str) -> str:
+    if event == "LEFT":
+        return "BACK"
+    if event == "RIGHT":
+        return "SELECT"
+    return event
 
 
 def _advance_player_time(player, delta_s: float):
@@ -1891,7 +1912,7 @@ def _now_playing_song_artist_text(player, library) -> str:
         return f"Audio unavailable - {getattr(state, 'error', 'unknown') or 'unknown'}"
     current = getattr(state, "current_track", None)
     if current is None:
-        return "Nothing queued - Use Shuffle All"
+        return "Nothing queued - Press Play"
 
     metadata = library.track_by_path(current)
     if metadata is not None:
@@ -1912,7 +1933,8 @@ def _play_pause_or_shuffle_all(player, library) -> bool:
         current = None
 
     if current is None:
-        return handle_menu_action("Shuffle All", library, player)
+        # Start with a random track but keep shuffle mode disabled.
+        return _start_random_queue(library, player, shuffle=False)
     try:
         return bool(player.toggle_pause())
     except Exception:
@@ -2054,7 +2076,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
         if config.show_controls_log and config.interactive:
             logging.info("Music library root: %s", MUSIC_DIR)
             logging.info(
-                "Controls: u/d/s, b (back), q, p/n/k/r, v+/v-, b+/b-, m, c then Enter"
+                "Controls: u/d/s + left/right, b (back), q, p/n/k/r, v+/v-, b+/b-, m, c then Enter"
             )
 
         while True:
@@ -2072,6 +2094,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
 
             should_redraw = False
             if event is not None:
+                event = normalize_navigation_event_alias(event)
                 stats.events_processed += 1
                 if event == "QUIT":
                     break
