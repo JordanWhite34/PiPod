@@ -8,7 +8,7 @@ import select
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable, Protocol, Sequence
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
@@ -67,6 +67,13 @@ FOLDER_ART_NAMES = (
     "front.png",
 )
 _MODE_ICON_MASK_CACHE: dict[tuple[str, int, int], Image.Image | None] = {}
+UNKNOWN_ARTIST = "Unknown Artist"
+UNKNOWN_ALBUM = "Unknown Album"
+MUSIC_ICON_PLAYLIST = "playlist"
+MUSIC_ICON_ARTIST = "artist"
+MUSIC_ICON_ALBUM = "album"
+MUSIC_ICON_SONG = "song"
+MUSIC_ICON_CATEGORY = "category"
 
 
 class DisplayLike(Protocol):
@@ -90,6 +97,8 @@ class LibraryLike(Protocol):
     def scan(self): ...
 
     def random_tracks(self): ...
+
+    def all_tracks(self): ...
 
     def track_by_path(self, path: Path): ...
 
@@ -196,6 +205,32 @@ class RunStats:
         }
 
 
+@dataclass(frozen=True)
+class MusicTrackEntry:
+    path: Path
+    title: str
+    artist: str
+    album: str
+    track_no: int
+
+
+@dataclass(frozen=True)
+class MusicItem:
+    id: str
+    label: str
+    icon: str
+    kind: str
+    track_paths: tuple[Path, ...] = ()
+    child_items: tuple["MusicItem", ...] = ()
+
+
+@dataclass
+class MusicViewState:
+    title: str
+    items: tuple[MusicItem, ...]
+    selected_idx: int = 0
+
+
 def measure_text_width(text, font):
     """Measure rendered text width for overflow/scroll decisions."""
     probe = Image.new("1", (1, 1), 255)
@@ -227,6 +262,287 @@ def ellipsize_text(text, font, width):
         else:
             high = mid - 1
     return text[:low].rstrip() + ellipsis
+
+
+def _normalize_metadata_text(value, fallback):
+    text = str(value or "").strip()
+    return text if text else fallback
+
+
+def _safe_track_no(value):
+    try:
+        return max(0, int(value))
+    except Exception:
+        return 0
+
+
+def _track_sort_key(entry: MusicTrackEntry):
+    return (
+        entry.artist.casefold(),
+        entry.album.casefold(),
+        9999 if entry.track_no <= 0 else entry.track_no,
+        entry.title.casefold(),
+        str(entry.path).casefold(),
+    )
+
+
+def _coerce_music_entries(tracks: Sequence) -> list[MusicTrackEntry]:
+    entries: list[MusicTrackEntry] = []
+    for track in tracks:
+        raw_path = getattr(track, "path", None)
+        if raw_path is None:
+            continue
+        path = Path(raw_path)
+        title = _normalize_metadata_text(getattr(track, "title", ""), fallback=path.stem or "Unknown Track")
+        artist = _normalize_metadata_text(getattr(track, "artist", ""), fallback=UNKNOWN_ARTIST)
+        album = _normalize_metadata_text(getattr(track, "album", ""), fallback=UNKNOWN_ALBUM)
+        track_no = _safe_track_no(getattr(track, "track_no", 0))
+        entries.append(
+            MusicTrackEntry(
+                path=path,
+                title=title,
+                artist=artist,
+                album=album,
+                track_no=track_no,
+            )
+        )
+    entries.sort(key=_track_sort_key)
+    return entries
+
+
+def _song_item(entry: MusicTrackEntry, *, item_id: str, label: str) -> MusicItem:
+    return MusicItem(
+        id=item_id,
+        label=label,
+        icon=MUSIC_ICON_SONG,
+        kind="song",
+        track_paths=(entry.path,),
+        child_items=(),
+    )
+
+
+def build_music_index(tracks: Sequence) -> tuple[MusicItem, ...]:
+    entries = _coerce_music_entries(tracks)
+    all_paths = tuple(entry.path for entry in entries)
+
+    all_songs_playlist = MusicItem(
+        id="playlist:all_songs",
+        label="All Songs",
+        icon=MUSIC_ICON_PLAYLIST,
+        kind="playlist",
+        track_paths=all_paths,
+        child_items=(),
+    )
+    shuffle_all_playlist = MusicItem(
+        id="playlist:shuffle_all",
+        label="Shuffle All",
+        icon=MUSIC_ICON_PLAYLIST,
+        kind="playlist_shuffle",
+        track_paths=(),
+        child_items=(),
+    )
+    playlists_items = (all_songs_playlist, shuffle_all_playlist)
+
+    artist_map: dict[str, dict[str, list[MusicTrackEntry]]] = {}
+    for entry in entries:
+        album_map = artist_map.setdefault(entry.artist, {})
+        album_map.setdefault(entry.album, []).append(entry)
+
+    artist_items: list[MusicItem] = []
+    for artist in sorted(artist_map.keys(), key=lambda value: value.casefold()):
+        album_map = artist_map[artist]
+        album_items: list[MusicItem] = []
+        for album in sorted(album_map.keys(), key=lambda value: value.casefold()):
+            album_entries = sorted(album_map[album], key=_track_sort_key)
+            song_items = tuple(
+                _song_item(
+                    song,
+                    item_id=f"song:{song.path}",
+                    label=song.title,
+                )
+                for song in album_entries
+            )
+            album_items.append(
+                MusicItem(
+                    id=f"artist_album:{artist}|{album}",
+                    label=album,
+                    icon=MUSIC_ICON_ALBUM,
+                    kind="album",
+                    track_paths=tuple(song.path for song in album_entries),
+                    child_items=song_items,
+                )
+            )
+        artist_tracks = [song.path for album_entries in album_map.values() for song in album_entries]
+        artist_items.append(
+            MusicItem(
+                id=f"artist:{artist}",
+                label=artist,
+                icon=MUSIC_ICON_ARTIST,
+                kind="artist",
+                track_paths=tuple(artist_tracks),
+                child_items=tuple(album_items),
+            )
+        )
+
+    album_groups: dict[tuple[str, str], list[MusicTrackEntry]] = {}
+    for entry in entries:
+        album_groups.setdefault((entry.album, entry.artist), []).append(entry)
+    album_items: list[MusicItem] = []
+    for album_key in sorted(album_groups.keys(), key=lambda value: (value[0].casefold(), value[1].casefold())):
+        album, artist = album_key
+        album_entries = sorted(album_groups[album_key], key=_track_sort_key)
+        song_items = tuple(
+            _song_item(
+                song,
+                item_id=f"song:{song.path}",
+                label=song.title,
+            )
+            for song in album_entries
+        )
+        album_items.append(
+            MusicItem(
+                id=f"album:{artist}|{album}",
+                label=f"{album} - {artist}",
+                icon=MUSIC_ICON_ALBUM,
+                kind="album",
+                track_paths=tuple(song.path for song in album_entries),
+                child_items=song_items,
+            )
+        )
+
+    songs_items = tuple(
+        _song_item(
+            song,
+            item_id=f"song:{song.path}",
+            label=f"{song.title} - {song.artist}",
+        )
+        for song in entries
+    )
+
+    root_items = (
+        MusicItem(
+            id="music:playlists",
+            label="Playlists",
+            icon=MUSIC_ICON_CATEGORY,
+            kind="category",
+            child_items=playlists_items,
+        ),
+        MusicItem(
+            id="music:artists",
+            label="Artists",
+            icon=MUSIC_ICON_CATEGORY,
+            kind="category",
+            child_items=tuple(artist_items),
+        ),
+        MusicItem(
+            id="music:albums",
+            label="Albums",
+            icon=MUSIC_ICON_CATEGORY,
+            kind="category",
+            child_items=tuple(album_items),
+        ),
+        MusicItem(
+            id="music:songs",
+            label="Songs",
+            icon=MUSIC_ICON_CATEGORY,
+            kind="category",
+            child_items=songs_items,
+        ),
+    )
+    return root_items
+
+
+def _clamp_index(index: int, size: int) -> int:
+    if size <= 0:
+        return 0
+    return max(0, min(int(index), size - 1))
+
+
+def _find_item_index(items: tuple[MusicItem, ...], item_id: str | None) -> int | None:
+    if not item_id:
+        return None
+    for idx, item in enumerate(items):
+        if item.id == item_id:
+            return idx
+    return None
+
+
+def _selected_music_ids(nav_stack: list[MusicViewState]) -> list[str]:
+    ids: list[str] = []
+    for view in nav_stack:
+        if not view.items:
+            break
+        idx = _clamp_index(view.selected_idx, len(view.items))
+        ids.append(view.items[idx].id)
+    return ids
+
+
+def _restore_music_nav_stack(
+    root_items: tuple[MusicItem, ...],
+    previous_stack: list[MusicViewState] | None = None,
+) -> list[MusicViewState]:
+    selected_ids = _selected_music_ids(previous_stack or [])
+    root_idx = _find_item_index(root_items, selected_ids[0] if selected_ids else None)
+    stack = [MusicViewState(title="Music", items=root_items, selected_idx=root_idx or 0)]
+    for selected_id in selected_ids[1:]:
+        parent_view = stack[-1]
+        if not parent_view.items:
+            break
+        parent_idx = _clamp_index(parent_view.selected_idx, len(parent_view.items))
+        parent_item = parent_view.items[parent_idx]
+        if not parent_item.child_items:
+            break
+        child_idx = _find_item_index(parent_item.child_items, selected_id)
+        stack.append(
+            MusicViewState(
+                title=parent_item.label,
+                items=parent_item.child_items,
+                selected_idx=child_idx or 0,
+            )
+        )
+    return stack
+
+
+def _current_music_view(nav_stack: list[MusicViewState]) -> MusicViewState:
+    if nav_stack:
+        return nav_stack[-1]
+    return MusicViewState(title="Music", items=(), selected_idx=0)
+
+
+def _current_music_view_name(nav_stack: list[MusicViewState]) -> str:
+    return "music_list" if len(nav_stack) > 1 else "music_root"
+
+
+def _music_song_queue(items: tuple[MusicItem, ...], selected_item: MusicItem) -> list[Path]:
+    song_paths: list[Path] = []
+    seen: set[Path] = set()
+    for item in items:
+        if item.kind != "song" or not item.track_paths:
+            continue
+        path = Path(item.track_paths[0])
+        if path in seen:
+            continue
+        seen.add(path)
+        song_paths.append(path)
+
+    if not selected_item.track_paths:
+        return song_paths
+
+    selected_path = Path(selected_item.track_paths[0])
+    if selected_path not in song_paths:
+        return song_paths
+    selected_idx = song_paths.index(selected_path)
+    return song_paths[selected_idx:] + song_paths[:selected_idx]
+
+
+def _safe_library_tracks(library) -> list:
+    all_tracks_fn = getattr(library, "all_tracks", None)
+    if callable(all_tracks_fn):
+        try:
+            return list(all_tracks_fn())
+        except Exception as exc:
+            logging.warning("Failed to read all tracks for music browser: %s", exc)
+    return []
 
 
 def format_clock(total_seconds):
@@ -1024,6 +1340,42 @@ def draw_icon_loop(draw, x, y, color):
     draw.polygon([(x + 5, y + 9), (x + 1, y + 11), (x + 5, y + 13)], fill=color)
 
 
+def draw_music_item_icon(draw, x, y, icon_name, color):
+    x = int(x)
+    y = int(y)
+    if icon_name == MUSIC_ICON_PLAYLIST:
+        for idx in range(3):
+            yy = y + 2 + (idx * 4)
+            draw.rectangle((x + 1, yy, x + 2, yy + 1), fill=color)
+            draw.rectangle((x + 4, yy, x + 12, yy + 1), fill=color)
+        return
+
+    if icon_name == MUSIC_ICON_ARTIST:
+        draw.ellipse((x + 4, y + 1, x + 9, y + 6), outline=color, fill=255)
+        draw.arc((x + 1, y + 5, x + 12, y + 13), 200, -20, fill=color)
+        return
+
+    if icon_name == MUSIC_ICON_ALBUM:
+        draw.ellipse((x + 1, y + 1, x + 12, y + 12), outline=color, fill=255)
+        draw.ellipse((x + 5, y + 5, x + 8, y + 8), outline=color, fill=255)
+        return
+
+    if icon_name == MUSIC_ICON_SONG:
+        draw.line((x + 8, y + 1, x + 8, y + 9), fill=color, width=1)
+        draw.line((x + 8, y + 1, x + 12, y + 2), fill=color, width=1)
+        draw.ellipse((x + 3, y + 7, x + 7, y + 11), outline=color, fill=255)
+        return
+
+    # Category icon fallback.
+    draw.rectangle((x + 1, y + 4, x + 12, y + 11), outline=color, fill=255)
+    draw.rectangle((x + 1, y + 2, x + 6, y + 4), outline=color, fill=255)
+
+
+def draw_music_chevron(draw, x, y, color):
+    draw.line((x, y, x + 3, y + 3), fill=color)
+    draw.line((x + 3, y + 3, x, y + 6), fill=color)
+
+
 def draw_icon_button(
     draw,
     x0,
@@ -1196,8 +1548,11 @@ def render_menu(
     draw = ImageDraw.Draw(image)
     title_font, item_font, hint_font = fonts
 
-    draw.text((8, 4), "PiPod", font=title_font, fill=0)
     status_x = epd.width - 31
+    title_left = 4
+    title_width = max(0, status_x - title_left - 4)
+    title_text = ellipsize_text("PiPod", title_font, title_width)
+    draw.text((title_left, 4), title_text, font=title_font, fill=0)
     draw_battery_icon(
         draw,
         status_x,
@@ -1237,6 +1592,87 @@ def render_menu(
         scroll_px=footer_scroll_px,
     )
 
+    return image
+
+
+def render_music_browser(
+    epd,
+    fonts,
+    view_state: MusicViewState,
+    status,
+    charge_anim_frame,
+    selected_label=None,
+    footer_scroll_px=0,
+):
+    image = Image.new("1", (epd.width, epd.height), 255)
+    draw = ImageDraw.Draw(image)
+    title_font, item_font, hint_font = fonts
+
+    status_x = epd.width - 31
+    title_left = 4
+    title_width = max(0, status_x - title_left - 4)
+    title_text = ellipsize_text(view_state.title, title_font, title_width)
+    draw.text((title_left, 4), title_text, font=title_font, fill=0)
+    draw_battery_icon(
+        draw,
+        status_x,
+        1,
+        status.battery_percent,
+        status.is_charging,
+        charge_anim_frame=charge_anim_frame,
+    )
+    draw_volume_icon(draw, status_x, 13, status.volume_level, status.is_muted)
+    draw.line((0, 26, epd.width - 1, 26), fill=0)
+
+    start_y = 34
+    row_h = 24
+    footer_left = 6
+    footer_top = epd.height - 20
+    footer_width = epd.width - (footer_left * 2)
+    footer_height = epd.height - footer_top
+
+    visible_rows = max(1, (footer_top - start_y) // row_h)
+    total_items = len(view_state.items)
+    selected_idx = _clamp_index(view_state.selected_idx, total_items)
+    max_start = max(0, total_items - visible_rows)
+    window_start = max(0, min(max_start, selected_idx - (visible_rows // 2)))
+
+    text_left = 29
+    for row in range(visible_rows):
+        idx = window_start + row
+        if idx >= total_items:
+            break
+        item = view_state.items[idx]
+        row_top = start_y + row * row_h
+        selected = idx == selected_idx
+        fg = 255 if selected else 0
+        if selected:
+            draw.rectangle((6, row_top - 2, epd.width - 7, row_top + 16), fill=0)
+
+        draw_music_item_icon(draw, 11, row_top + 1, item.icon, fg)
+        has_children = bool(item.child_items)
+        right_padding = 18 if has_children else 9
+        label_width = max(0, epd.width - text_left - right_padding)
+        label = ellipsize_text(item.label, item_font, label_width)
+        draw.text((text_left, row_top), label, font=item_font, fill=fg)
+        if has_children:
+            draw_music_chevron(draw, epd.width - 14, row_top + 5, fg)
+
+    if total_items == 0:
+        draw.text((11, start_y), "No music found", font=item_font, fill=0)
+
+    draw.line((0, footer_top - 4, epd.width - 1, footer_top - 4), fill=0)
+    footer_text = selected_label if selected_label else DEFAULT_FOOTER_TEXT
+    draw_footer_text(
+        image,
+        hint_font,
+        footer_text,
+        footer_left,
+        footer_top,
+        footer_width,
+        footer_height,
+        scroll_px=footer_scroll_px,
+    )
     return image
 
 
@@ -1483,6 +1919,36 @@ def _play_pause_or_shuffle_all(player, library) -> bool:
         return False
 
 
+def _select_music_item(
+    view: MusicViewState,
+    item: MusicItem,
+    player,
+    library,
+) -> tuple[bool, MusicViewState | None]:
+    if item.child_items:
+        return True, MusicViewState(title=item.label, items=item.child_items, selected_idx=0)
+
+    if item.kind == "playlist_shuffle":
+        return handle_menu_action("Shuffle All", library, player), None
+
+    if item.kind == "playlist":
+        if not item.track_paths:
+            return False, None
+        started = player.set_queue(list(item.track_paths), shuffle=False, autoplay=True)
+        return bool(started), None
+
+    if item.kind == "song":
+        queue_paths = _music_song_queue(view.items, item)
+        if not queue_paths and item.track_paths:
+            queue_paths = [Path(item.track_paths[0])]
+        if not queue_paths:
+            return False, None
+        started = player.set_queue(queue_paths, shuffle=False, autoplay=True)
+        return bool(started), None
+
+    return False, None
+
+
 def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict:
     """Run the shared PiPod application loop and return structured stats."""
     epd = dependencies.display
@@ -1501,6 +1967,8 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
     selected_idx = 0
     current_view = "menu"
     selected_label = None
+    music_root_items: tuple[MusicItem, ...] = ()
+    music_nav_stack: list[MusicViewState] = []
     album_art_cache = {}
     now_playing_last_progress_bucket = -1
     now_playing_focus_index = 1
@@ -1560,6 +2028,8 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
 
         _safe_scan_library(library)
         library_totals_label = _safe_library_totals_label(library)
+        music_root_items = build_music_index(_safe_library_tracks(library))
+        music_nav_stack = _restore_music_nav_stack(music_root_items)
 
         if config.initialize_display:
             logging.info("Initializing display")
@@ -1613,7 +2083,11 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                     should_redraw = True
                 elif current_view == "menu" and event == "SELECT":
                     menu_item = MENU_ITEMS[selected_idx]
-                    if menu_item == "Now Playing":
+                    if menu_item == "Music":
+                        music_nav_stack = [MusicViewState(title="Music", items=music_root_items, selected_idx=0)]
+                        current_view = _current_music_view_name(music_nav_stack)
+                        should_redraw = True
+                    elif menu_item == "Now Playing":
                         current_view = "now_playing"
                         now_playing_focus_index = 1
                         now_playing_last_progress_bucket = -1
@@ -1621,6 +2095,26 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                         should_redraw = True
                     elif handle_menu_action(menu_item, library, player):
                         should_redraw = True
+                elif current_view in ("music_root", "music_list") and event == "UP":
+                    view = _current_music_view(music_nav_stack)
+                    if view.items:
+                        view.selected_idx = (view.selected_idx - 1) % len(view.items)
+                        should_redraw = True
+                elif current_view in ("music_root", "music_list") and event == "DOWN":
+                    view = _current_music_view(music_nav_stack)
+                    if view.items:
+                        view.selected_idx = (view.selected_idx + 1) % len(view.items)
+                        should_redraw = True
+                elif current_view in ("music_root", "music_list") and event == "SELECT":
+                    view = _current_music_view(music_nav_stack)
+                    if view.items:
+                        selected_item = view.items[_clamp_index(view.selected_idx, len(view.items))]
+                        handled, next_view = _select_music_item(view, selected_item, player, library)
+                        should_redraw = handled or should_redraw
+                        if next_view is not None:
+                            music_nav_stack.append(next_view)
+                            current_view = _current_music_view_name(music_nav_stack)
+                            should_redraw = True
                 elif current_view == "now_playing" and event == "UP":
                     now_playing_focus_index = (now_playing_focus_index - 1) % len(NOW_PLAYING_FOCUSABLE)
                     should_redraw = True
@@ -1644,6 +2138,14 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                     now_playing_last_progress_bucket = -1
                     set_selected_label(footer_status_label(library_totals_label, player))
                     should_redraw = True
+                elif current_view in ("music_root", "music_list") and event == "BACK":
+                    if len(music_nav_stack) > 1:
+                        music_nav_stack.pop()
+                        current_view = _current_music_view_name(music_nav_stack)
+                    else:
+                        current_view = "menu"
+                        set_selected_label(footer_status_label(library_totals_label, player))
+                    should_redraw = True
                 elif event == "PLAY_PAUSE":
                     should_redraw = _play_pause_or_shuffle_all(player, library) or should_redraw
                 elif event == "NEXT_TRACK":
@@ -1653,6 +2155,10 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                 elif event == "RESCAN_LIBRARY":
                     _safe_scan_library(library)
                     library_totals_label = _safe_library_totals_label(library)
+                    music_root_items = build_music_index(_safe_library_tracks(library))
+                    music_nav_stack = _restore_music_nav_stack(music_root_items, music_nav_stack)
+                    if current_view in ("music_root", "music_list"):
+                        current_view = _current_music_view_name(music_nav_stack)
                     should_redraw = True
                 else:
                     should_redraw = status_plumbing.apply_debug_event(event)
@@ -1689,10 +2195,10 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
             footer_label = footer_status_label(library_totals_label, player)
             if footer_label != selected_label:
                 set_selected_label(footer_label)
-                if current_view == "menu":
+                if current_view in ("menu", "music_root", "music_list"):
                     should_redraw = True
 
-            if current_view == "menu" and footer_should_scroll:
+            if current_view in ("menu", "music_root", "music_list") and footer_should_scroll:
                 elapsed = now_clock() - footer_last_scroll_tick
                 steps = int(elapsed / FOOTER_SCROLL_INTERVAL_S)
                 if steps > 0:
@@ -1715,6 +2221,16 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                         album_art_cache,
                         focus_index=now_playing_focus_index,
                         song_scroll_px=now_playing_song_scroll_px,
+                    )
+                elif current_view in ("music_root", "music_list"):
+                    image = render_music_browser(
+                        epd,
+                        fonts,
+                        _current_music_view(music_nav_stack),
+                        status,
+                        status_plumbing.charge_anim_frame(),
+                        selected_label=selected_label,
+                        footer_scroll_px=footer_scroll_px,
                     )
                 else:
                     image = render_menu(

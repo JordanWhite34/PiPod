@@ -122,7 +122,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--scenario",
-        choices=["smoke", "navigation", "playback", "status_controls", "all"],
+        choices=["smoke", "navigation", "playback", "status_controls", "music_browse", "all"],
         default="all",
         help="Scripted scenario to execute",
     )

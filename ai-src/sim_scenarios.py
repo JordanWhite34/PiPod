@@ -47,6 +47,33 @@ SCENARIOS: dict[str, list[str]] = {
         "TOGGLE_CHARGE",
         "QUIT",
     ],
+    "music_browse": [
+        "SELECT",  # Music -> root
+        "SELECT",  # Playlists
+        "DOWN",  # Shuffle All
+        "SELECT",  # start shuffle playback
+        "BACK",  # back to root
+        "DOWN",  # Artists
+        "SELECT",
+        "SELECT",
+        "SELECT",
+        "BACK",
+        "BACK",
+        "BACK",
+        "DOWN",  # Albums
+        "DOWN",
+        "SELECT",
+        "SELECT",
+        "SELECT",
+        "BACK",
+        "BACK",
+        "DOWN",  # Songs
+        "DOWN",
+        "DOWN",
+        "SELECT",
+        "BACK",
+        "QUIT",
+    ],
 }
 
 

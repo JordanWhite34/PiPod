@@ -21,11 +21,15 @@ from pipod_runtime import (
     NOW_PLAYING_TIME_TOP_GAP,
     NOW_PLAYING_TITLE_TOP_GAP,
     NOW_PLAYING_VOLUME_TOP_GAP,
+    RunConfig,
+    RuntimeDependencies,
     StatusPlumbing,
     VOLUME_SLIDER_KNOB_CENTER_Y_OFFSET,
     _volume_slider_knob_x,
+    build_music_index,
     load_fonts,
     render_now_playing,
+    run_pipod_loop,
 )
 from simulator_adapters import FakeEPD, FixtureLibrary, MockPlayer
 
@@ -205,6 +209,150 @@ class SimulatorAdapterTests(unittest.TestCase):
             NOW_PLAYING_FOCUSABLE,
             ("PREV", "PLAY_PAUSE", "NEXT", "SHUFFLE", "LOOP"),
         )
+
+
+class ScriptedEventProvider:
+    def __init__(self, events: list[str]):
+        self._events = list(events)
+        self._index = 0
+
+    def __call__(self, timeout_s: float) -> str | None:
+        _ = timeout_s
+        if self._index >= len(self._events):
+            return "QUIT"
+        event = self._events[self._index]
+        self._index += 1
+        return event
+
+
+class MusicBrowserTests(unittest.TestCase):
+    def _run_scripted(self, events: list[str]) -> tuple[dict, MockPlayer]:
+        library = FixtureLibrary(FIXTURE_PATH, seed=1337)
+        player = MockPlayer(seed=1337)
+        player.set_track_durations(library.duration_map())
+        epd = FakeEPD(write_frames=False)
+        dependencies = RuntimeDependencies(
+            display=epd,
+            library=library,
+            player=player,
+            event_provider=ScriptedEventProvider(events),
+            fonts=load_fonts(),
+            status_plumbing=StatusPlumbing(),
+        )
+        config = RunConfig(
+            timeout_s=0.0,
+            max_steps=200,
+            interactive=False,
+            show_controls_log=False,
+            initialize_display=False,
+            clear_display_on_start=False,
+            loop_step_s=0.5,
+            raise_exceptions=True,
+        )
+
+        try:
+            stats = run_pipod_loop(config, dependencies)
+        finally:
+            library.close()
+            player.shutdown()
+            epd.sleep()
+
+        return stats, player
+
+    def test_music_root_entries_and_view(self):
+        fixture_library = FixtureLibrary(FIXTURE_PATH, seed=1337)
+        tracks = fixture_library.all_tracks()
+        fixture_library.close()
+        root_items = build_music_index(tracks)
+        self.assertEqual([item.label for item in root_items], ["Playlists", "Artists", "Albums", "Songs"])
+
+        stats, _ = self._run_scripted(["SELECT", "QUIT"])
+        self.assertEqual(stats["final_view"], "music_root")
+
+    def test_artists_path_starts_playback(self):
+        stats, player = self._run_scripted(
+            [
+                "SELECT",  # Music root
+                "DOWN",  # Artists
+                "SELECT",
+                "SELECT",  # first artist
+                "SELECT",  # first album
+                "SELECT",  # first song
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "music_list")
+        self.assertEqual(str(player.current_track_path()), "/sim/Aphex Twin/Selected Ambient Works 85-92/03 Xtal.mp3")
+
+    def test_albums_path_starts_playback(self):
+        stats, player = self._run_scripted(
+            [
+                "SELECT",  # Music root
+                "DOWN",
+                "DOWN",  # Albums
+                "SELECT",
+                "SELECT",  # first album
+                "SELECT",  # first song
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "music_list")
+        self.assertEqual(
+            str(player.current_track_path()),
+            "/sim/Nina Simone/Anthology/07 Sinnerman (Live at the Village Gate - Extra Long Deliberately Verbose Test Title Version).mp3",
+        )
+
+    def test_songs_path_starts_contextual_queue(self):
+        stats, player = self._run_scripted(
+            [
+                "SELECT",  # Music root
+                "DOWN",
+                "DOWN",
+                "DOWN",  # Songs
+                "SELECT",
+                "DOWN",
+                "DOWN",  # select third song in sorted list
+                "SELECT",
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "music_list")
+        self.assertEqual(
+            str(player.current_track_path()),
+            "/sim/Daft Punk/Discovery/02 Aerodynamic.mp3",
+        )
+        self.assertTrue(player.next_track())
+        self.assertEqual(
+            str(player.current_track_path()),
+            "/sim/Fleetwood Mac/Rumours/01 Dreams.mp3",
+        )
+
+    def test_playlists_shuffle_all_stays_in_music_view(self):
+        stats, player = self._run_scripted(
+            [
+                "SELECT",  # Music root
+                "SELECT",  # Playlists
+                "DOWN",  # Shuffle All
+                "SELECT",
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "music_list")
+        self.assertIsNotNone(player.current_track_path())
+
+    def test_back_navigation_returns_to_menu(self):
+        stats, _ = self._run_scripted(
+            [
+                "SELECT",  # Music root
+                "DOWN",  # Artists
+                "SELECT",  # enter artists
+                "BACK",  # back to music root
+                "BACK",  # back to menu
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "menu")
+        self.assertEqual(stats["selected_menu_item"], "Music")
 
 
 if __name__ == "__main__":
