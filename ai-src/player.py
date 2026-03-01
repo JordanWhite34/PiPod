@@ -137,6 +137,8 @@ class MusicPlayer:
     def next_track(self) -> bool:
         if not self._available or not self._queue:
             return False
+        if not self._loop_enabled and self._index >= len(self._queue) - 1:
+            return False
         start_index = 0 if self._index < 0 else (self._index + 1) % len(self._queue)
         self._is_paused = False
         return self._play_from_index(start_index, step=1)
@@ -162,7 +164,27 @@ class MusicPlayer:
             return False
         if pygame.mixer.music.get_busy():
             return False
+        if not self._loop_enabled and self._index >= len(self._queue) - 1:
+            self.stop()
+            return True
         return self.next_track()
+
+    def toggle_shuffle(self) -> bool:
+        self._shuffle_enabled = not self._shuffle_enabled
+        if self._queue and self._shuffle_enabled:
+            current = self.current_track_path()
+            if current is not None:
+                rest = [path for idx, path in enumerate(self._queue) if idx != self._index]
+                random.shuffle(rest)
+                self._queue = [current, *rest]
+                self._index = 0
+            else:
+                random.shuffle(self._queue)
+        return True
+
+    def toggle_loop(self) -> bool:
+        self._loop_enabled = not self._loop_enabled
+        return True
 
     def set_volume_level(self, level: int):
         self._volume_level = _clamp_volume_level(level)

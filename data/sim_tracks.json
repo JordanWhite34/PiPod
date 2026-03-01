@@ -1,0 +1,68 @@
+{
+  "tracks": [
+    {
+      "path": "/sim/Daft Punk/Discovery/01 One More Time.mp3",
+      "title": "One More Time",
+      "artist": "Daft Punk",
+      "album": "Discovery",
+      "track_no": 1,
+      "duration_s": 320
+    },
+    {
+      "path": "/sim/Daft Punk/Discovery/02 Aerodynamic.mp3",
+      "title": "Aerodynamic",
+      "artist": "Daft Punk",
+      "album": "Discovery",
+      "track_no": 2,
+      "duration_s": 212
+    },
+    {
+      "path": "/sim/Fleetwood Mac/Rumours/01 Dreams.mp3",
+      "title": "Dreams",
+      "artist": "Fleetwood Mac",
+      "album": "Rumours",
+      "track_no": 1,
+      "duration_s": 258
+    },
+    {
+      "path": "/sim/Fleetwood Mac/Rumours/02 Never Going Back Again.mp3",
+      "title": "Never Going Back Again",
+      "artist": "Fleetwood Mac",
+      "album": "Rumours",
+      "track_no": 2,
+      "duration_s": 134
+    },
+    {
+      "path": "/sim/Nina Simone/Anthology/07 Sinnerman (Live at the Village Gate - Extra Long Deliberately Verbose Test Title Version).mp3",
+      "title": "Sinnerman (Live at the Village Gate - Extra Long Deliberately Verbose Test Title Version)",
+      "artist": "Nina Simone",
+      "album": "Anthology",
+      "track_no": 7,
+      "duration_s": 623
+    },
+    {
+      "path": "/sim/Unknown/Loose Files/Untitled Sketch 01.mp3",
+      "title": "Untitled Sketch 01",
+      "artist": "",
+      "album": "",
+      "track_no": 0,
+      "duration_s": 91
+    },
+    {
+      "path": "/sim/Kendrick Lamar/good kid, m.A.A.d city/09 m.A.A.d city.mp3",
+      "title": "m.A.A.d city",
+      "artist": "Kendrick Lamar",
+      "album": "good kid, m.A.A.d city",
+      "track_no": 9,
+      "duration_s": 350
+    },
+    {
+      "path": "/sim/Aphex Twin/Selected Ambient Works 85-92/03 Xtal.mp3",
+      "title": "Xtal",
+      "artist": "Aphex Twin",
+      "album": "Selected Ambient Works 85-92",
+      "track_no": 3,
+      "duration_s": 293
+    }
+  ]
+}
