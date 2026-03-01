@@ -56,3 +56,56 @@ Example 2:
      Sudo python epd_2in9bc_test.py
     
 Note: For epd_1in54_V2_test.py and epd_2in13_V2_test.py, please note that the V2 logo is attached to the back of your screen.
+
+-----------------------------------------------------------------------------
+PiPod Runtime Settings (ai-src)
+-----------------------------------------------------------------------------
+
+The PiPod runtime now includes a full in-device Settings page.
+
+Main menu:
+- Music
+- Now Playing
+- Shuffle All
+- Settings
+
+Settings sections:
+- Bluetooth
+  - Scan & Pair Headphones
+  - Paired Devices
+  - Adapter Status
+- Music Sync
+  - Sync From Import Folder
+  - Import Folder Path
+  - Last Sync Result
+- Audio Output
+  - Auto / AUX / Bluetooth
+- Library
+  - Rebuild Library Index
+- About
+  - Runtime/system status summary
+
+Controls:
+- `u` / `d` to move
+- `s` or `right` to select
+- `b` or `left` to go back
+- In Settings lists, the selected row text starts horizontal scrolling after 1 second if it is too long.
+
+Settings persistence:
+- Stored in `data/settings.json`
+- Keys:
+  - `audio_output_mode`
+  - `music_import_dir`
+  - `last_connected_bt_address`
+
+Music sync workflow:
+1. Copy audio files from your computer into the device import folder
+   (default: `/home/jrwhite/PiPodSync/inbox`).
+2. On PiPod go to: `Settings > Music Sync > Sync From Import Folder`.
+3. PiPod copies supported audio files into the music library root and rescans.
+4. Result summary is shown in the footer and Last Sync Result row.
+
+Bluetooth notes:
+- Bluetooth actions use `bluetoothctl` when available.
+- If `bluetoothctl` is not installed, Bluetooth pages remain available and show
+  clear unavailable messages instead of crashing.

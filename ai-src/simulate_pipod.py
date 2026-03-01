@@ -22,7 +22,8 @@ from pipod_runtime import (
     sync_audio_output,
 )
 from sim_scenarios import WAIT, expand_scenarios, scenario_events
-from simulator_adapters import FakeEPD, FixtureLibrary, MockPlayer
+from settings_store import SettingsStore
+from simulator_adapters import FakeEPD, FakeSettingsActions, FixtureLibrary, MockPlayer
 
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parent
@@ -122,7 +123,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--scenario",
-        choices=["smoke", "navigation", "playback", "status_controls", "music_browse", "all"],
+        choices=["smoke", "navigation", "playback", "status_controls", "music_browse", "settings_smoke", "all"],
         default="all",
         help="Scripted scenario to execute",
     )
@@ -265,6 +266,8 @@ def run_with_dependencies(
         event_provider=event_provider,
         fonts=load_fonts(),
         status_plumbing=status_plumbing,
+        settings_store=SettingsStore(output_dir / f"{run_label}_settings.json"),
+        settings_actions=FakeSettingsActions(music_dir=Path(args.music_dir).expanduser()),
     )
 
     try:

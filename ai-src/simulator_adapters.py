@@ -8,6 +8,7 @@ import random
 from typing import Any, Callable
 
 from PIL import Image
+from settings_actions import BluetoothDevice, SettingsActionResult
 
 UNKNOWN_ARTIST = "Unknown Artist"
 UNKNOWN_ALBUM = "Unknown Album"
@@ -389,3 +390,139 @@ class MockPlayer:
         if current is None:
             return 0
         return max(0, int(self._duration_map.get(current, 0)))
+
+
+class FakeSettingsActions:
+    """Deterministic settings adapter for tests and simulator runs."""
+
+    def __init__(self, music_dir: Path):
+        self.music_dir = Path(music_dir)
+        self._paired_devices: dict[str, BluetoothDevice] = {
+            "AA:BB:CC:DD:EE:01": BluetoothDevice(
+                address="AA:BB:CC:DD:EE:01",
+                name="Studio Cans",
+                paired=True,
+                connected=False,
+                trusted=True,
+            ),
+            "AA:BB:CC:DD:EE:02": BluetoothDevice(
+                address="AA:BB:CC:DD:EE:02",
+                name="Travel Buds",
+                paired=True,
+                connected=True,
+                trusted=True,
+            ),
+        }
+        self._scan_devices = [
+            BluetoothDevice(address="AA:BB:CC:DD:EE:11", name="New Headphones"),
+            BluetoothDevice(address="AA:BB:CC:DD:EE:22", name="Desk Speaker"),
+        ]
+
+    def bluetooth_adapter_status(self) -> SettingsActionResult:
+        return SettingsActionResult(
+            ok=True,
+            message="Adapter on",
+            details={"powered": True, "discoverable": True, "pairable": True},
+        )
+
+    def bluetooth_scan(self, duration_s: int | None = None) -> SettingsActionResult:
+        _ = duration_s
+        devices = self._scan_devices + list(self._paired_devices.values())
+        devices.sort(key=lambda device: (device.name.casefold(), device.address))
+        return SettingsActionResult(
+            ok=True,
+            message=f"Found {len(devices)} device(s)",
+            details={"devices": devices},
+        )
+
+    def bluetooth_paired_devices(self) -> SettingsActionResult:
+        devices = sorted(self._paired_devices.values(), key=lambda device: (device.name.casefold(), device.address))
+        return SettingsActionResult(
+            ok=True,
+            message=f"{len(devices)} paired device(s)",
+            details={"devices": devices},
+        )
+
+    def bluetooth_pair_connect(self, address: str) -> SettingsActionResult:
+        address = str(address).strip().upper()
+        if not address:
+            return SettingsActionResult(ok=False, message="Bluetooth address required")
+        device = next((entry for entry in self._scan_devices if entry.address == address), None)
+        if device is None:
+            device = BluetoothDevice(address=address, name=address)
+        self._paired_devices[address] = BluetoothDevice(
+            address=address,
+            name=device.name,
+            paired=True,
+            connected=True,
+            trusted=True,
+        )
+        for key, existing in list(self._paired_devices.items()):
+            if key != address and existing.connected:
+                self._paired_devices[key] = BluetoothDevice(
+                    address=existing.address,
+                    name=existing.name,
+                    paired=existing.paired,
+                    connected=False,
+                    trusted=existing.trusted,
+                )
+        return SettingsActionResult(ok=True, message="Paired and connected", details={"address": address})
+
+    def bluetooth_connect(self, address: str) -> SettingsActionResult:
+        address = str(address).strip().upper()
+        device = self._paired_devices.get(address)
+        if device is None:
+            return SettingsActionResult(ok=False, message="Device not paired", details={"address": address})
+        self._paired_devices[address] = BluetoothDevice(
+            address=device.address,
+            name=device.name,
+            paired=True,
+            connected=True,
+            trusted=device.trusted,
+        )
+        return SettingsActionResult(ok=True, message="Connected", details={"address": address})
+
+    def bluetooth_disconnect(self, address: str) -> SettingsActionResult:
+        address = str(address).strip().upper()
+        device = self._paired_devices.get(address)
+        if device is None:
+            return SettingsActionResult(ok=False, message="Device not paired", details={"address": address})
+        self._paired_devices[address] = BluetoothDevice(
+            address=device.address,
+            name=device.name,
+            paired=True,
+            connected=False,
+            trusted=device.trusted,
+        )
+        return SettingsActionResult(ok=True, message="Disconnected", details={"address": address})
+
+    def bluetooth_forget(self, address: str) -> SettingsActionResult:
+        address = str(address).strip().upper()
+        if address in self._paired_devices:
+            del self._paired_devices[address]
+            return SettingsActionResult(ok=True, message="Device forgotten", details={"address": address})
+        return SettingsActionResult(ok=False, message="Device not paired", details={"address": address})
+
+    def sync_music_from_import(self, import_dir: Path) -> SettingsActionResult:
+        _ = Path(import_dir)
+        return SettingsActionResult(
+            ok=True,
+            message="Sync: 2 imported, 1 skipped, 0 errors",
+            details={"imported": 2, "skipped": 1, "errors": 0},
+        )
+
+    def system_info(self, player, library, settings) -> SettingsActionResult:
+        try:
+            artists, songs, albums = library.library_counts()
+            library_label = f"{artists} artists / {songs} songs / {albums} albums"
+        except Exception:
+            library_label = "unknown"
+        rows = (
+            ("Audio Backend", f"{player.state().backend} (ok)"),
+            ("Audio Mode", str(settings.audio_output_mode)),
+            ("Music Root", str(self.music_dir)),
+            ("Import Folder", str(settings.music_import_dir)),
+            ("Last BT Device", str(settings.last_connected_bt_address or "None")),
+            ("Library", library_label),
+        )
+        return SettingsActionResult(ok=True, message="System information", details={"rows": rows})

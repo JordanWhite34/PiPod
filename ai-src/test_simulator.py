@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import tempfile
 import os
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -20,22 +21,28 @@ from pipod_runtime import (
     NOW_PLAYING_FOCUSABLE,
     NOW_PLAYING_LEFT_MARGIN,
     NOW_PLAYING_PROGRESS_TOP_GAP,
+    SETTINGS_ITEM_SCROLL_DELAY_S,
     NOW_PLAYING_TIME_TOP_GAP,
     NOW_PLAYING_TITLE_TOP_GAP,
     NOW_PLAYING_VOLUME_TOP_GAP,
     RunConfig,
     RuntimeDependencies,
+    SettingsItem,
+    SettingsViewState,
     StatusPlumbing,
     VOLUME_SLIDER_KNOB_CENTER_Y_OFFSET,
     _volume_slider_knob_x,
     build_music_index,
     load_fonts,
     parse_input_token,
+    render_settings_browser,
     render_now_playing,
     run_pipod_loop,
 )
+from settings_actions import SettingsActionResult, SettingsActions
+from settings_store import PersistedSettings, SettingsStore
 from input_provider import CombinedEventProvider, GpioFiveWayConfig, GpioFiveWayInput
-from simulator_adapters import FakeEPD, FixtureLibrary, MockPlayer
+from simulator_adapters import FakeEPD, FakeSettingsActions, FixtureLibrary, MockPlayer
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 FIXTURE_PATH = ROOT_DIR / "data" / "sim_tracks.json"
@@ -215,6 +222,57 @@ class SimulatorAdapterTests(unittest.TestCase):
         )
 
 
+class SettingsRenderTests(unittest.TestCase):
+    def test_settings_selected_item_scroll_delay_is_one_second(self):
+        self.assertEqual(SETTINGS_ITEM_SCROLL_DELAY_S, 1.0)
+
+    def test_render_settings_selected_row_scroll_changes_pixels(self):
+        epd = FakeEPD(write_frames=False)
+        status = StatusPlumbing().read()
+        fonts = load_fonts()
+        long_label = (
+            "Import Folder: /home/jrwhite/PiPodSync/inbox/"
+            "this/is/a/very/long/path/that/must/scroll/to/read"
+        )
+        view = SettingsViewState(
+            view_id="settings_test",
+            title="Settings",
+            items=(
+                SettingsItem(
+                    id="settings:test:item",
+                    label=long_label,
+                    kind="info",
+                    help_text="Long path",
+                ),
+            ),
+            selected_idx=0,
+        )
+
+        image_start = render_settings_browser(
+            epd=epd,
+            fonts=fonts,
+            view_state=view,
+            status=status,
+            charge_anim_frame=0,
+            selected_label="test",
+            footer_scroll_px=0,
+            selected_item_scroll_px=0,
+        )
+        image_scrolled = render_settings_browser(
+            epd=epd,
+            fonts=fonts,
+            view_state=view,
+            status=status,
+            charge_anim_frame=0,
+            selected_label="test",
+            footer_scroll_px=0,
+            selected_item_scroll_px=48,
+        )
+
+        row_box = (11, 34, epd.width - 9, 52)
+        self.assertNotEqual(image_start.crop(row_box).tobytes(), image_scrolled.crop(row_box).tobytes())
+
+
 class InputParsingTests(unittest.TestCase):
     def test_parse_input_token_supports_left_and_right(self):
         self.assertEqual(parse_input_token("left"), "LEFT")
@@ -351,31 +409,35 @@ class MusicBrowserTests(unittest.TestCase):
         player = MockPlayer(seed=1337)
         player.set_track_durations(library.duration_map())
         epd = FakeEPD(write_frames=False)
-        dependencies = RuntimeDependencies(
-            display=epd,
-            library=library,
-            player=player,
-            event_provider=ScriptedEventProvider(events),
-            fonts=load_fonts(),
-            status_plumbing=StatusPlumbing(),
-        )
-        config = RunConfig(
-            timeout_s=0.0,
-            max_steps=200,
-            interactive=False,
-            show_controls_log=False,
-            initialize_display=False,
-            clear_display_on_start=False,
-            loop_step_s=0.5,
-            raise_exceptions=True,
-        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_store = SettingsStore(Path(temp_dir) / "settings.json")
+            dependencies = RuntimeDependencies(
+                display=epd,
+                library=library,
+                player=player,
+                event_provider=ScriptedEventProvider(events),
+                fonts=load_fonts(),
+                status_plumbing=StatusPlumbing(),
+                settings_store=settings_store,
+                settings_actions=FakeSettingsActions(music_dir=Path("/sim/music")),
+            )
+            config = RunConfig(
+                timeout_s=0.0,
+                max_steps=200,
+                interactive=False,
+                show_controls_log=False,
+                initialize_display=False,
+                clear_display_on_start=False,
+                loop_step_s=0.5,
+                raise_exceptions=True,
+            )
 
-        try:
-            stats = run_pipod_loop(config, dependencies)
-        finally:
-            library.close()
-            player.shutdown()
-            epd.sleep()
+            try:
+                stats = run_pipod_loop(config, dependencies)
+            finally:
+                library.close()
+                player.shutdown()
+                epd.sleep()
 
         return stats, player
 
@@ -527,6 +589,229 @@ class MusicBrowserTests(unittest.TestCase):
         self.assertEqual(stats["final_view"], "menu")
         self.assertIsNotNone(player.current_track_path())
         self.assertFalse(player.state().is_shuffle)
+
+    def test_menu_settings_enters_settings_root(self):
+        stats, _ = self._run_scripted(
+            [
+                "DOWN",
+                "DOWN",
+                "DOWN",  # Settings
+                "SELECT",
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "settings_root")
+        self.assertEqual(stats["selected_menu_item"], "Settings")
+
+    def test_settings_back_returns_to_menu(self):
+        stats, _ = self._run_scripted(
+            [
+                "DOWN",
+                "DOWN",
+                "DOWN",  # Settings
+                "SELECT",
+                "BACK",
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "menu")
+        self.assertEqual(stats["selected_menu_item"], "Settings")
+
+    def test_right_left_alias_supports_settings_navigation(self):
+        stats, _ = self._run_scripted(
+            [
+                "DOWN",
+                "DOWN",
+                "DOWN",  # Settings
+                "RIGHT",
+                "LEFT",
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "menu")
+        self.assertEqual(stats["selected_menu_item"], "Settings")
+
+
+class SettingsStoreTests(unittest.TestCase):
+    def test_settings_store_creates_defaults_when_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            store = SettingsStore(settings_path)
+            settings = store.load()
+            self.assertEqual(settings, PersistedSettings())
+            self.assertTrue(settings_path.exists())
+
+    def test_settings_store_round_trip(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            store = SettingsStore(settings_path)
+            expected = PersistedSettings(
+                audio_output_mode="bluetooth",
+                music_import_dir="/tmp/import",
+                last_connected_bt_address="AA:BB:CC:DD:EE:FF",
+            )
+            store.save(expected)
+            actual = store.load()
+            self.assertEqual(actual, expected)
+
+    def test_settings_store_migrates_legacy_speaker_mode_to_aux(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "audio_output_mode": "speaker",
+                        "music_import_dir": "/tmp/import",
+                        "last_connected_bt_address": None,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            store = SettingsStore(settings_path)
+            settings = store.load()
+            self.assertEqual(settings.audio_output_mode, "aux")
+
+
+class SettingsActionsTests(unittest.TestCase):
+    def test_sync_music_from_import_copies_supported_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            import_dir = root / "inbox"
+            music_dir = root / "music"
+            (import_dir / "Artist/Album").mkdir(parents=True, exist_ok=True)
+            (import_dir / "Artist/Album/track01.mp3").write_bytes(b"mp3-a")
+            (import_dir / "Artist/Album/track02.flac").write_bytes(b"flac-b")
+            (import_dir / "Artist/Album/notes.txt").write_text("ignore me", encoding="utf-8")
+
+            actions = SettingsActions(music_dir=music_dir)
+            result = actions.sync_music_from_import(import_dir)
+            self.assertTrue(result.ok)
+            self.assertEqual(result.details["imported"], 2)
+            self.assertEqual(result.details["skipped"], 1)
+            self.assertEqual(result.details["errors"], 0)
+            self.assertTrue((music_dir / "Artist/Album/track01.mp3").exists())
+            self.assertTrue((music_dir / "Artist/Album/track02.flac").exists())
+
+    def test_sync_music_from_import_missing_folder_returns_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            actions = SettingsActions(music_dir=root / "music")
+            result = actions.sync_music_from_import(root / "missing")
+            self.assertFalse(result.ok)
+            self.assertIn("Import folder missing", result.message)
+
+
+class RuntimeSettingsFlowTests(unittest.TestCase):
+    def _run_scripted(
+        self,
+        events: list[str],
+        *,
+        settings_actions=None,
+    ) -> tuple[dict, Path, object]:
+        class CountingFixtureLibrary(FixtureLibrary):
+            def __init__(self, fixture_path: Path, seed: int = 1337):
+                super().__init__(fixture_path, seed=seed)
+                self.scan_calls = 0
+
+            def scan(self):
+                self.scan_calls += 1
+                return super().scan()
+
+        library = CountingFixtureLibrary(FIXTURE_PATH, seed=1337)
+        player = MockPlayer(seed=1337)
+        player.set_track_durations(library.duration_map())
+        epd = FakeEPD(write_frames=False)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            dependencies = RuntimeDependencies(
+                display=epd,
+                library=library,
+                player=player,
+                event_provider=ScriptedEventProvider(events),
+                fonts=load_fonts(),
+                status_plumbing=StatusPlumbing(),
+                settings_store=SettingsStore(settings_path),
+                settings_actions=settings_actions or FakeSettingsActions(music_dir=Path("/sim/music")),
+            )
+            config = RunConfig(
+                timeout_s=0.0,
+                max_steps=220,
+                interactive=False,
+                show_controls_log=False,
+                initialize_display=False,
+                clear_display_on_start=False,
+                loop_step_s=0.5,
+                raise_exceptions=True,
+            )
+            try:
+                stats = run_pipod_loop(config, dependencies)
+            finally:
+                library.close()
+                player.shutdown()
+                epd.sleep()
+            persisted = SettingsStore(settings_path).load()
+            return stats, settings_path, (library, persisted)
+
+    def test_settings_bluetooth_scan_pair_persists_last_device(self):
+        stats, _, state = self._run_scripted(
+            [
+                "DOWN",
+                "DOWN",
+                "DOWN",  # Settings
+                "SELECT",  # enter settings
+                "SELECT",  # Bluetooth
+                "SELECT",  # Scan & Pair Headphones
+                "DOWN",  # first discovered device (after Scan Again)
+                "SELECT",  # pair/connect
+                "QUIT",
+            ]
+        )
+        _, persisted = state
+        self.assertEqual(stats["final_view"], "settings_list")
+        self.assertIsNotNone(persisted.last_connected_bt_address)
+
+    def test_settings_music_sync_triggers_library_rescan(self):
+        stats, _, state = self._run_scripted(
+            [
+                "DOWN",
+                "DOWN",
+                "DOWN",  # Settings
+                "SELECT",
+                "DOWN",  # Music Sync
+                "SELECT",
+                "SELECT",  # Sync From Import Folder
+                "QUIT",
+            ]
+        )
+        library, _ = state
+        self.assertEqual(stats["final_view"], "settings_list")
+        self.assertGreaterEqual(library.scan_calls, 2)
+
+    def test_unavailable_bluetooth_actions_do_not_crash(self):
+        class UnavailableSettingsActions(FakeSettingsActions):
+            def bluetooth_adapter_status(self):
+                return SettingsActionResult(ok=False, message="Bluetooth unavailable")
+
+            def bluetooth_scan(self, duration_s: int | None = None):
+                _ = duration_s
+                return SettingsActionResult(ok=False, message="Bluetooth unavailable", details={"devices": []})
+
+            def bluetooth_paired_devices(self):
+                return SettingsActionResult(ok=False, message="Bluetooth unavailable", details={"devices": []})
+
+        stats, _, _ = self._run_scripted(
+            [
+                "DOWN",
+                "DOWN",
+                "DOWN",  # Settings
+                "SELECT",
+                "SELECT",  # Bluetooth
+                "SELECT",  # Scan
+                "QUIT",
+            ],
+            settings_actions=UnavailableSettingsActions(music_dir=Path("/sim/music")),
+        )
+        self.assertIn(stats["final_view"], {"settings_root", "settings_list"})
 
 
 if __name__ == "__main__":

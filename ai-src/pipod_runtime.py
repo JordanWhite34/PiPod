@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+from settings_actions import BluetoothDevice, SettingsActionResult, SettingsActions
+from settings_store import PersistedSettings, SettingsStore
 
 try:
     from mutagen import File as MutagenFile
@@ -46,6 +48,10 @@ NOW_PLAYING_TITLE_SCROLL_DELAY_S = 2.2
 NOW_PLAYING_TITLE_SCROLL_INTERVAL_S = 0.12
 NOW_PLAYING_TITLE_SCROLL_STEP_PX = 1
 NOW_PLAYING_TITLE_SCROLL_GAP_PX = 24
+SETTINGS_ITEM_SCROLL_DELAY_S = 1.0
+SETTINGS_ITEM_SCROLL_INTERVAL_S = 0.12
+SETTINGS_ITEM_SCROLL_STEP_PX = 1
+SETTINGS_ITEM_SCROLL_GAP_PX = 24
 NOW_PLAYING_ART_SIZE = 96
 NOW_PLAYING_LEFT_MARGIN = 8
 NOW_PLAYING_ART_TOP = 8
@@ -137,6 +143,32 @@ class PlayerLike(Protocol):
     def shutdown(self): ...
 
 
+class SettingsStoreLike(Protocol):
+    def load(self) -> PersistedSettings: ...
+
+    def save(self, settings: PersistedSettings) -> None: ...
+
+
+class SettingsActionsLike(Protocol):
+    def bluetooth_adapter_status(self) -> SettingsActionResult: ...
+
+    def bluetooth_scan(self, duration_s: int | None = None) -> SettingsActionResult: ...
+
+    def bluetooth_paired_devices(self) -> SettingsActionResult: ...
+
+    def bluetooth_pair_connect(self, address: str) -> SettingsActionResult: ...
+
+    def bluetooth_connect(self, address: str) -> SettingsActionResult: ...
+
+    def bluetooth_disconnect(self, address: str) -> SettingsActionResult: ...
+
+    def bluetooth_forget(self, address: str) -> SettingsActionResult: ...
+
+    def sync_music_from_import(self, import_dir: Path) -> SettingsActionResult: ...
+
+    def system_info(self, player, library, settings: PersistedSettings) -> SettingsActionResult: ...
+
+
 EventProvider = Callable[[float], str | None]
 
 NOW_PLAYING_FOCUSABLE = (
@@ -194,6 +226,8 @@ class RuntimeDependencies:
     event_provider: EventProvider | None = None
     fonts: tuple | None = None
     status_plumbing: "StatusPlumbing" | None = None
+    settings_store: SettingsStoreLike | None = None
+    settings_actions: SettingsActionsLike | None = None
 
 
 @dataclass
@@ -255,6 +289,27 @@ class MusicViewState:
     title: str
     items: tuple[MusicItem, ...]
     selected_idx: int = 0
+
+
+@dataclass(frozen=True)
+class SettingsItem:
+    id: str
+    label: str
+    kind: str = "action"
+    help_text: str = ""
+    action: str | None = None
+    address: str | None = None
+    connected: bool = False
+    value: str = ""
+
+
+@dataclass
+class SettingsViewState:
+    view_id: str
+    title: str
+    items: tuple[SettingsItem, ...]
+    selected_idx: int = 0
+    context: str | None = None
 
 
 def measure_text_width(text, font):
@@ -561,6 +616,298 @@ def _music_song_queue(items: tuple[MusicItem, ...], selected_item: MusicItem) ->
     return song_paths[selected_idx:] + song_paths[:selected_idx]
 
 
+def _current_settings_view(nav_stack: list[SettingsViewState]) -> SettingsViewState:
+    if nav_stack:
+        return nav_stack[-1]
+    return SettingsViewState(view_id="settings_root", title="Settings", items=(), selected_idx=0)
+
+
+def _current_settings_view_name(nav_stack: list[SettingsViewState]) -> str:
+    return "settings_list" if len(nav_stack) > 1 else "settings_root"
+
+
+def _normalize_bt_devices(raw_devices) -> list[BluetoothDevice]:
+    devices: list[BluetoothDevice] = []
+    for entry in raw_devices or []:
+        if isinstance(entry, BluetoothDevice):
+            devices.append(entry)
+            continue
+        if isinstance(entry, dict):
+            address = str(entry.get("address", "")).strip().upper()
+            if not address:
+                continue
+            devices.append(
+                BluetoothDevice(
+                    address=address,
+                    name=str(entry.get("name", address)),
+                    paired=bool(entry.get("paired", False)),
+                    connected=bool(entry.get("connected", False)),
+                    trusted=bool(entry.get("trusted", False)),
+                )
+            )
+    devices.sort(key=lambda device: (device.name.casefold(), device.address))
+    return devices
+
+
+def _settings_root_items(
+    settings: PersistedSettings,
+    bt_status: SettingsActionResult,
+    last_sync_result: str | None,
+) -> tuple[SettingsItem, ...]:
+    bt_suffix = "on" if bool(bt_status.details.get("powered", False)) else "off"
+    if not bt_status.ok:
+        bt_suffix = "unavailable"
+    sync_label = last_sync_result if last_sync_result else "Not yet synced"
+    return (
+        SettingsItem(
+            id="settings:bluetooth",
+            label=f"Bluetooth ({bt_suffix})",
+            kind="submenu",
+            help_text="Scan and pair headphones",
+            action="open_bluetooth",
+        ),
+        SettingsItem(
+            id="settings:music_sync",
+            label="Music Sync",
+            kind="submenu",
+            help_text="Import music from computer drop folder",
+            action="open_music_sync",
+        ),
+        SettingsItem(
+            id="settings:audio_output",
+            label=f"Audio Output ({settings.audio_output_mode})",
+            kind="submenu",
+            help_text="Set preferred output mode",
+            action="open_audio_output",
+        ),
+        SettingsItem(
+            id="settings:library",
+            label="Library",
+            kind="submenu",
+            help_text="Rebuild indexed music library",
+            action="open_library",
+        ),
+        SettingsItem(
+            id="settings:about",
+            label="About",
+            kind="submenu",
+            help_text=f"Last sync: {sync_label}",
+            action="open_about",
+        ),
+    )
+
+
+def _settings_bluetooth_items(bt_status: SettingsActionResult) -> tuple[SettingsItem, ...]:
+    status_text = bt_status.message if bt_status.message else "Adapter status unavailable"
+    return (
+        SettingsItem(
+            id="settings:bt_scan",
+            label="Scan & Pair Headphones",
+            kind="action",
+            help_text="Find nearby devices and pair",
+            action="bt_scan",
+        ),
+        SettingsItem(
+            id="settings:bt_paired",
+            label="Paired Devices",
+            kind="action",
+            help_text="Connect, disconnect, or forget",
+            action="bt_paired",
+        ),
+        SettingsItem(
+            id="settings:bt_status",
+            label=f"Adapter Status: {status_text}",
+            kind="info",
+            help_text="Bluetooth adapter details",
+        ),
+    )
+
+
+def _settings_bluetooth_scan_items(result: SettingsActionResult) -> tuple[SettingsItem, ...]:
+    devices = _normalize_bt_devices(result.details.get("devices", []))
+    items: list[SettingsItem] = [
+        SettingsItem(
+            id="settings:bt_scan_again",
+            label="Scan Again",
+            kind="action",
+            help_text="Rescan nearby Bluetooth devices",
+            action="bt_scan",
+        )
+    ]
+    for device in devices:
+        state = "connected" if device.connected else "paired" if device.paired else "new"
+        items.append(
+            SettingsItem(
+                id=f"settings:bt_scan:{device.address}",
+                label=f"{device.name} ({state})",
+                kind="action",
+                help_text="Pair and connect this device",
+                action="bt_pair_connect",
+                address=device.address,
+            )
+        )
+    if len(items) == 1:
+        items.append(
+            SettingsItem(
+                id="settings:bt_scan_none",
+                label="No devices found",
+                kind="info",
+                help_text="Try Scan Again with device in pairing mode",
+            )
+        )
+    return tuple(items)
+
+
+def _settings_bluetooth_paired_items(result: SettingsActionResult) -> tuple[SettingsItem, ...]:
+    devices = _normalize_bt_devices(result.details.get("devices", []))
+    items: list[SettingsItem] = []
+    for device in devices:
+        state = "connected" if device.connected else "disconnected"
+        items.append(
+            SettingsItem(
+                id=f"settings:bt_paired:{device.address}",
+                label=f"{device.name} ({state})",
+                kind="action",
+                help_text="Open device actions",
+                action="bt_open_device",
+                address=device.address,
+                connected=device.connected,
+            )
+        )
+    if not items:
+        items.append(
+            SettingsItem(
+                id="settings:bt_paired_none",
+                label="No paired devices",
+                kind="info",
+                help_text="Pair headphones first from scan list",
+            )
+        )
+    return tuple(items)
+
+
+def _settings_bluetooth_device_detail_items(device: BluetoothDevice) -> tuple[SettingsItem, ...]:
+    primary_action = "bt_disconnect" if device.connected else "bt_connect"
+    primary_label = "Disconnect" if device.connected else "Connect"
+    return (
+        SettingsItem(
+            id=f"settings:bt_detail:{device.address}:toggle",
+            label=primary_label,
+            kind="action",
+            help_text="Toggle device connection state",
+            action=primary_action,
+            address=device.address,
+        ),
+        SettingsItem(
+            id=f"settings:bt_detail:{device.address}:forget",
+            label="Forget Device",
+            kind="action",
+            help_text="Remove pairing from device list",
+            action="bt_forget",
+            address=device.address,
+        ),
+        SettingsItem(
+            id=f"settings:bt_detail:{device.address}:status",
+            label=f"Status: {'connected' if device.connected else 'disconnected'}",
+            kind="info",
+            help_text=device.address,
+        ),
+    )
+
+
+def _settings_music_sync_items(settings: PersistedSettings, last_sync_result: str | None) -> tuple[SettingsItem, ...]:
+    sync_label = last_sync_result or "Not yet synced"
+    return (
+        SettingsItem(
+            id="settings:sync_run",
+            label="Sync From Import Folder",
+            kind="action",
+            help_text="Copy audio files and rescan library",
+            action="sync_music",
+        ),
+        SettingsItem(
+            id="settings:sync_path",
+            label=f"Import Folder: {settings.music_import_dir}",
+            kind="info",
+            help_text="Copy files here from your computer",
+        ),
+        SettingsItem(
+            id="settings:sync_last",
+            label=f"Last Sync: {sync_label}",
+            kind="info",
+            help_text="Most recent import summary",
+        ),
+    )
+
+
+def _settings_audio_output_items(settings: PersistedSettings) -> tuple[SettingsItem, ...]:
+    def mode_item(mode: str, label: str) -> SettingsItem:
+        marker = "[x]" if settings.audio_output_mode == mode else "[ ]"
+        return SettingsItem(
+            id=f"settings:audio:{mode}",
+            label=f"{marker} {label}",
+            kind="action",
+            help_text=f"Set output mode to {label.lower()}",
+            action="set_audio_mode",
+            value=mode,
+        )
+
+    return (
+        mode_item("auto", "Auto"),
+        mode_item("aux", "AUX"),
+        mode_item("bluetooth", "Bluetooth"),
+    )
+
+
+def _settings_library_items() -> tuple[SettingsItem, ...]:
+    return (
+        SettingsItem(
+            id="settings:library:rebuild",
+            label="Rebuild Library Index",
+            kind="action",
+            help_text="Rescan all music files",
+            action="rebuild_library",
+        ),
+    )
+
+
+def _settings_about_items(info_result: SettingsActionResult) -> tuple[SettingsItem, ...]:
+    rows = info_result.details.get("rows", ())
+    items: list[SettingsItem] = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) != 2:
+            continue
+        items.append(
+            SettingsItem(
+                id=f"settings:about:{row[0]}",
+                label=f"{row[0]}: {row[1]}",
+                kind="info",
+                help_text="System/runtime status",
+            )
+        )
+    if not items:
+        items.append(
+            SettingsItem(
+                id="settings:about:none",
+                label="No system information available",
+                kind="info",
+                help_text="Runtime status unavailable",
+            )
+        )
+    return tuple(items)
+
+
+def _settings_footer_label(nav_stack: list[SettingsViewState], last_result: str | None) -> str:
+    view = _current_settings_view(nav_stack)
+    if not view.items:
+        return str(last_result or "b back")
+    selected = view.items[_clamp_index(view.selected_idx, len(view.items))]
+    help_text = selected.help_text or "s select  b back"
+    if last_result:
+        return f"{last_result} | {help_text}"
+    return help_text
+
+
 def _safe_library_tracks(library) -> list:
     all_tracks_fn = getattr(library, "all_tracks", None)
     if callable(all_tracks_fn):
@@ -745,6 +1092,42 @@ def draw_scrolling_text(
         offset = int(scroll_px) % cycle_width
         strip_draw.text((-offset, 0), text, font=font, fill=0)
         strip_draw.text((cycle_width - offset, 0), text, font=font, fill=0)
+
+    image.paste(strip, (x, y))
+
+
+def draw_scrolling_text_line(
+    image,
+    font,
+    text,
+    x,
+    y,
+    width,
+    height,
+    scroll_px=0,
+    gap_px=24,
+    text_fill=0,
+    bg_fill=255,
+):
+    """Draw one-line text with optional loop-scroll and configurable colors."""
+    if width <= 0 or height <= 0:
+        return
+
+    strip = Image.new("1", (width, height), bg_fill)
+    strip_draw = ImageDraw.Draw(strip)
+    text = str(text or "").strip()
+    if not text:
+        image.paste(strip, (x, y))
+        return
+
+    text_width = int(strip_draw.textlength(text, font=font) + 0.999)
+    if text_width <= width:
+        strip_draw.text((0, 0), text, font=font, fill=text_fill)
+    else:
+        cycle_width = text_width + max(8, int(gap_px))
+        offset = int(scroll_px) % cycle_width
+        strip_draw.text((-offset, 0), text, font=font, fill=text_fill)
+        strip_draw.text((cycle_width - offset, 0), text, font=font, fill=text_fill)
 
     image.paste(strip, (x, y))
 
@@ -1706,6 +2089,100 @@ def render_music_browser(
     return image
 
 
+def render_settings_browser(
+    epd,
+    fonts,
+    view_state: SettingsViewState,
+    status,
+    charge_anim_frame,
+    selected_label=None,
+    footer_scroll_px=0,
+    selected_item_scroll_px=0,
+):
+    image = Image.new("1", (epd.width, epd.height), 255)
+    draw = ImageDraw.Draw(image)
+    title_font, item_font, hint_font = fonts
+
+    status_x = epd.width - 31
+    title_left = 4
+    title_width = max(0, status_x - title_left - 4)
+    title_text = ellipsize_text(view_state.title, title_font, title_width)
+    draw.text((title_left, 4), title_text, font=title_font, fill=0)
+    draw_battery_icon(
+        draw,
+        status_x,
+        1,
+        status.battery_percent,
+        status.is_charging,
+        charge_anim_frame=charge_anim_frame,
+    )
+    draw_volume_icon(draw, status_x, 13, status.volume_level, status.is_muted)
+    draw.line((0, 26, epd.width - 1, 26), fill=0)
+
+    start_y = 34
+    row_h = 24
+    footer_left = 6
+    footer_top = epd.height - 20
+    footer_width = epd.width - (footer_left * 2)
+    footer_height = epd.height - footer_top
+
+    visible_rows = max(1, (footer_top - start_y) // row_h)
+    total_items = len(view_state.items)
+    selected_idx = _clamp_index(view_state.selected_idx, total_items)
+    max_start = max(0, total_items - visible_rows)
+    window_start = max(0, min(max_start, selected_idx - (visible_rows // 2)))
+
+    for row in range(visible_rows):
+        idx = window_start + row
+        if idx >= total_items:
+            break
+        item = view_state.items[idx]
+        row_top = start_y + row * row_h
+        selected = idx == selected_idx
+        fg = 255 if selected else 0
+        if selected:
+            draw.rectangle((6, row_top - 2, epd.width - 7, row_top + 16), fill=0)
+
+        right_padding = 18 if item.kind == "submenu" else 9
+        label_width = max(0, epd.width - 11 - right_padding)
+        if selected:
+            draw_scrolling_text_line(
+                image,
+                item_font,
+                item.label,
+                11,
+                row_top,
+                label_width,
+                18,
+                scroll_px=selected_item_scroll_px,
+                gap_px=SETTINGS_ITEM_SCROLL_GAP_PX,
+                text_fill=255,
+                bg_fill=0,
+            )
+        else:
+            label = ellipsize_text(item.label, item_font, label_width)
+            draw.text((11, row_top), label, font=item_font, fill=fg)
+        if item.kind == "submenu":
+            draw_music_chevron(draw, epd.width - 14, row_top + 5, fg)
+
+    if total_items == 0:
+        draw.text((11, start_y), "No settings available", font=item_font, fill=0)
+
+    draw.line((0, footer_top - 4, epd.width - 1, footer_top - 4), fill=0)
+    footer_text = selected_label if selected_label else "s select  b back"
+    draw_footer_text(
+        image,
+        hint_font,
+        footer_text,
+        footer_left,
+        footer_top,
+        footer_width,
+        footer_height,
+        scroll_px=footer_scroll_px,
+    )
+    return image
+
+
 def render_now_playing(
     epd,
     fonts,
@@ -1866,6 +2343,34 @@ def _safe_scan_library(library):
         return None
 
 
+def _safe_load_settings(settings_store) -> PersistedSettings:
+    try:
+        return settings_store.load()
+    except Exception as exc:
+        logging.warning("Settings load failed: %s", exc)
+        return PersistedSettings()
+
+
+def _safe_save_settings(settings_store, settings: PersistedSettings) -> bool:
+    try:
+        settings_store.save(settings)
+        return True
+    except Exception as exc:
+        logging.warning("Settings save failed: %s", exc)
+        return False
+
+
+def _safe_settings_action(action_name: str, fn, *args, **kwargs) -> SettingsActionResult:
+    try:
+        result = fn(*args, **kwargs)
+    except Exception as exc:
+        logging.warning("Settings action '%s' failed: %s", action_name, exc)
+        return SettingsActionResult(ok=False, message=f"{action_name} failed: {exc}")
+    if isinstance(result, SettingsActionResult):
+        return result
+    return SettingsActionResult(ok=False, message=f"{action_name} returned invalid result")
+
+
 def _safe_library_totals_label(library):
     try:
         return format_library_totals(library)
@@ -1983,6 +2488,12 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
         else StatusPlumbing()
     )
     event_provider = dependencies.event_provider or read_key_event
+    settings_store = dependencies.settings_store if dependencies.settings_store is not None else SettingsStore()
+    settings_actions = (
+        dependencies.settings_actions
+        if dependencies.settings_actions is not None
+        else SettingsActions(music_dir=MUSIC_DIR)
+    )
 
     stats = RunStats()
 
@@ -1991,6 +2502,14 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
     selected_label = None
     music_root_items: tuple[MusicItem, ...] = ()
     music_nav_stack: list[MusicViewState] = []
+    settings_nav_stack: list[SettingsViewState] = []
+    settings = _safe_load_settings(settings_store)
+    settings_last_result: str | None = None
+    last_sync_result: str | None = None
+    settings_bt_status = _safe_settings_action(
+        "bluetooth_adapter_status",
+        settings_actions.bluetooth_adapter_status,
+    )
     album_art_cache = {}
     now_playing_last_progress_bucket = -1
     now_playing_focus_index = 1
@@ -1999,6 +2518,11 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
     now_playing_song_should_scroll = False
     now_playing_song_last_scroll_tick = 0.0
     now_playing_song_scroll_start_tick = 0.0
+    settings_item_scroll_key = ""
+    settings_item_scroll_px = 0
+    settings_item_should_scroll = False
+    settings_item_last_scroll_tick = 0.0
+    settings_item_scroll_start_tick = 0.0
     footer_width = epd.width - 12
     footer_scroll_px = 0
 
@@ -2012,6 +2536,8 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
     footer_last_scroll_tick = now_clock()
     now_playing_song_last_scroll_tick = now_clock()
     now_playing_song_scroll_start_tick = now_clock()
+    settings_item_last_scroll_tick = now_clock()
+    settings_item_scroll_start_tick = now_clock()
     footer_should_scroll = False
 
     def set_selected_label(value):
@@ -2043,6 +2569,180 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
             bool(now_playing_song_text)
             and measure_text_width(now_playing_song_text, fonts[1]) > (epd.width - 16)
         )
+
+    def set_settings_item_scroll_key(key_value, label_text, label_width):
+        nonlocal settings_item_scroll_key
+        nonlocal settings_item_scroll_px
+        nonlocal settings_item_should_scroll
+        nonlocal settings_item_last_scroll_tick
+        nonlocal settings_item_scroll_start_tick
+        key_text = str(key_value or "").strip()
+        label_text = str(label_text or "").strip()
+        key = f"{key_text}|{int(label_width)}"
+        if key == settings_item_scroll_key:
+            return False
+        settings_item_scroll_key = key
+        settings_item_scroll_px = 0
+        settings_item_last_scroll_tick = now_clock()
+        settings_item_scroll_start_tick = now_clock()
+        settings_item_should_scroll = (
+            bool(label_text)
+            and int(label_width) > 0
+            and measure_text_width(label_text, fonts[1]) > int(label_width)
+        )
+        return True
+
+    def refresh_selected_settings_scroll_state():
+        if not settings_nav_stack:
+            return set_settings_item_scroll_key("", "", 0)
+        view = _current_settings_view(settings_nav_stack)
+        if not view.items:
+            return set_settings_item_scroll_key("", "", 0)
+        selected_item = view.items[_clamp_index(view.selected_idx, len(view.items))]
+        right_padding = 18 if selected_item.kind == "submenu" else 9
+        label_width = max(0, epd.width - 11 - right_padding)
+        return set_settings_item_scroll_key(selected_item.id, selected_item.label, label_width)
+
+    def run_settings_action(action_name: str, fn, *args, **kwargs) -> SettingsActionResult:
+        logging.info("Settings action: %s", action_name)
+        result = _safe_settings_action(action_name, fn, *args, **kwargs)
+        logging.info("Settings action result: ok=%s msg=%s", result.ok, result.message)
+        return result
+
+    def build_settings_view(
+        view_id: str,
+        title: str,
+        items: tuple[SettingsItem, ...],
+        selected_hint: int = 0,
+        context: str | None = None,
+    ) -> SettingsViewState:
+        return SettingsViewState(
+            view_id=view_id,
+            title=title,
+            items=items,
+            selected_idx=_clamp_index(selected_hint, len(items)),
+            context=context,
+        )
+
+    def build_settings_root_view(selected_hint: int = 0) -> SettingsViewState:
+        return build_settings_view(
+            view_id="settings_root",
+            title="Settings",
+            items=_settings_root_items(settings, settings_bt_status, last_sync_result),
+            selected_hint=selected_hint,
+        )
+
+    def build_settings_bluetooth_view(selected_hint: int = 0) -> SettingsViewState:
+        return build_settings_view(
+            view_id="settings_bluetooth",
+            title="Bluetooth",
+            items=_settings_bluetooth_items(settings_bt_status),
+            selected_hint=selected_hint,
+        )
+
+    def build_settings_music_sync_view(selected_hint: int = 0) -> SettingsViewState:
+        return build_settings_view(
+            view_id="settings_music_sync",
+            title="Music Sync",
+            items=_settings_music_sync_items(settings, last_sync_result),
+            selected_hint=selected_hint,
+        )
+
+    def build_settings_audio_view(selected_hint: int = 0) -> SettingsViewState:
+        return build_settings_view(
+            view_id="settings_audio",
+            title="Audio Output",
+            items=_settings_audio_output_items(settings),
+            selected_hint=selected_hint,
+        )
+
+    def build_settings_library_view(selected_hint: int = 0) -> SettingsViewState:
+        return build_settings_view(
+            view_id="settings_library",
+            title="Library",
+            items=_settings_library_items(),
+            selected_hint=selected_hint,
+        )
+
+    def build_settings_about_view(selected_hint: int = 0) -> SettingsViewState:
+        info_result = run_settings_action("system_info", settings_actions.system_info, player, library, settings)
+        return build_settings_view(
+            view_id="settings_about",
+            title="About",
+            items=_settings_about_items(info_result),
+            selected_hint=selected_hint,
+        )
+
+    def build_settings_bt_scan_view(result: SettingsActionResult, selected_hint: int = 0) -> SettingsViewState:
+        return build_settings_view(
+            view_id="settings_bt_scan",
+            title="Scan Results",
+            items=_settings_bluetooth_scan_items(result),
+            selected_hint=selected_hint,
+        )
+
+    def build_settings_bt_paired_view(result: SettingsActionResult, selected_hint: int = 0) -> SettingsViewState:
+        return build_settings_view(
+            view_id="settings_bt_paired",
+            title="Paired Devices",
+            items=_settings_bluetooth_paired_items(result),
+            selected_hint=selected_hint,
+        )
+
+    def build_settings_bt_device_view(address: str, selected_hint: int = 0) -> SettingsViewState:
+        paired_result = run_settings_action("bluetooth_paired_devices", settings_actions.bluetooth_paired_devices)
+        devices = _normalize_bt_devices(paired_result.details.get("devices", []))
+        device = next((entry for entry in devices if entry.address == address), None)
+        if device is None:
+            items = (
+                SettingsItem(
+                    id="settings:bt_device_missing",
+                    label="Device not found",
+                    kind="info",
+                    help_text=address,
+                ),
+            )
+            return build_settings_view(
+                view_id="settings_bt_device",
+                title="Bluetooth Device",
+                items=items,
+                selected_hint=0,
+                context=address,
+            )
+        return build_settings_view(
+            view_id="settings_bt_device",
+            title=device.name,
+            items=_settings_bluetooth_device_detail_items(device),
+            selected_hint=selected_hint,
+            context=device.address,
+        )
+
+    def enter_settings_root():
+        nonlocal current_view
+        settings_nav_stack.clear()
+        settings_nav_stack.append(build_settings_root_view())
+        current_view = _current_settings_view_name(settings_nav_stack)
+
+    def refresh_settings_root_if_needed():
+        if not settings_nav_stack:
+            return
+        current_root = settings_nav_stack[0]
+        settings_nav_stack[0] = build_settings_root_view(selected_hint=current_root.selected_idx)
+
+    def replace_current_settings_view(view: SettingsViewState):
+        if settings_nav_stack:
+            settings_nav_stack[-1] = view
+        else:
+            settings_nav_stack.append(view)
+
+    def push_settings_view(view: SettingsViewState):
+        settings_nav_stack.append(view)
+
+    def set_settings_and_save(new_settings: PersistedSettings):
+        nonlocal settings
+        settings = new_settings
+        _safe_save_settings(settings_store, settings)
+        refresh_settings_root_if_needed()
 
     try:
         status = status_plumbing.read()
@@ -2116,6 +2816,13 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                         now_playing_last_progress_bucket = -1
                         set_now_playing_song_text(_now_playing_song_artist_text(player, library))
                         should_redraw = True
+                    elif menu_item == "Settings":
+                        settings_bt_status = run_settings_action(
+                            "bluetooth_adapter_status",
+                            settings_actions.bluetooth_adapter_status,
+                        )
+                        enter_settings_root()
+                        should_redraw = True
                     elif handle_menu_action(menu_item, library, player):
                         should_redraw = True
                 elif current_view in ("music_root", "music_list") and event == "UP":
@@ -2161,10 +2868,208 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                     now_playing_last_progress_bucket = -1
                     set_selected_label(footer_status_label(library_totals_label, player))
                     should_redraw = True
+                elif current_view in ("settings_root", "settings_list") and event == "UP":
+                    view = _current_settings_view(settings_nav_stack)
+                    if view.items:
+                        view.selected_idx = (view.selected_idx - 1) % len(view.items)
+                        should_redraw = True
+                elif current_view in ("settings_root", "settings_list") and event == "DOWN":
+                    view = _current_settings_view(settings_nav_stack)
+                    if view.items:
+                        view.selected_idx = (view.selected_idx + 1) % len(view.items)
+                        should_redraw = True
+                elif current_view in ("settings_root", "settings_list") and event == "SELECT":
+                    view = _current_settings_view(settings_nav_stack)
+                    if view.items:
+                        selected_item = view.items[_clamp_index(view.selected_idx, len(view.items))]
+                        action = selected_item.action
+                        if view.view_id == "settings_root":
+                            if action == "open_bluetooth":
+                                push_settings_view(build_settings_bluetooth_view())
+                                current_view = _current_settings_view_name(settings_nav_stack)
+                            elif action == "open_music_sync":
+                                push_settings_view(build_settings_music_sync_view())
+                                current_view = _current_settings_view_name(settings_nav_stack)
+                            elif action == "open_audio_output":
+                                push_settings_view(build_settings_audio_view())
+                                current_view = _current_settings_view_name(settings_nav_stack)
+                            elif action == "open_library":
+                                push_settings_view(build_settings_library_view())
+                                current_view = _current_settings_view_name(settings_nav_stack)
+                            elif action == "open_about":
+                                push_settings_view(build_settings_about_view())
+                                current_view = _current_settings_view_name(settings_nav_stack)
+                            should_redraw = True
+                        elif view.view_id == "settings_bluetooth":
+                            if action == "bt_scan":
+                                scan_result = run_settings_action("bluetooth_scan", settings_actions.bluetooth_scan)
+                                settings_last_result = scan_result.message
+                                push_settings_view(build_settings_bt_scan_view(scan_result))
+                                current_view = _current_settings_view_name(settings_nav_stack)
+                                should_redraw = True
+                            elif action == "bt_paired":
+                                paired_result = run_settings_action(
+                                    "bluetooth_paired_devices",
+                                    settings_actions.bluetooth_paired_devices,
+                                )
+                                settings_last_result = paired_result.message
+                                push_settings_view(build_settings_bt_paired_view(paired_result))
+                                current_view = _current_settings_view_name(settings_nav_stack)
+                                should_redraw = True
+                        elif view.view_id == "settings_bt_scan":
+                            if action == "bt_scan":
+                                scan_result = run_settings_action("bluetooth_scan", settings_actions.bluetooth_scan)
+                                settings_last_result = scan_result.message
+                                replace_current_settings_view(
+                                    build_settings_bt_scan_view(scan_result, selected_hint=view.selected_idx)
+                                )
+                                should_redraw = True
+                            elif action == "bt_pair_connect" and selected_item.address:
+                                pair_result = run_settings_action(
+                                    "bluetooth_pair_connect",
+                                    settings_actions.bluetooth_pair_connect,
+                                    selected_item.address,
+                                )
+                                settings_last_result = pair_result.message
+                                if pair_result.ok:
+                                    set_settings_and_save(
+                                        PersistedSettings(
+                                            audio_output_mode=settings.audio_output_mode,
+                                            music_import_dir=settings.music_import_dir,
+                                            last_connected_bt_address=selected_item.address,
+                                        )
+                                    )
+                                    settings_bt_status = run_settings_action(
+                                        "bluetooth_adapter_status",
+                                        settings_actions.bluetooth_adapter_status,
+                                    )
+                                    refresh_settings_root_if_needed()
+                                should_redraw = True
+                        elif view.view_id == "settings_bt_paired":
+                            if action == "bt_open_device" and selected_item.address:
+                                push_settings_view(build_settings_bt_device_view(selected_item.address))
+                                current_view = _current_settings_view_name(settings_nav_stack)
+                                should_redraw = True
+                        elif view.view_id == "settings_bt_device":
+                            address = selected_item.address or view.context
+                            if address and action in {"bt_connect", "bt_disconnect", "bt_forget"}:
+                                if action == "bt_connect":
+                                    action_result = run_settings_action(
+                                        "bluetooth_connect",
+                                        settings_actions.bluetooth_connect,
+                                        address,
+                                    )
+                                    if action_result.ok:
+                                        set_settings_and_save(
+                                            PersistedSettings(
+                                                audio_output_mode=settings.audio_output_mode,
+                                                music_import_dir=settings.music_import_dir,
+                                                last_connected_bt_address=address,
+                                            )
+                                        )
+                                elif action == "bt_disconnect":
+                                    action_result = run_settings_action(
+                                        "bluetooth_disconnect",
+                                        settings_actions.bluetooth_disconnect,
+                                        address,
+                                    )
+                                else:
+                                    action_result = run_settings_action(
+                                        "bluetooth_forget",
+                                        settings_actions.bluetooth_forget,
+                                        address,
+                                    )
+                                    if action_result.ok and settings.last_connected_bt_address == address:
+                                        set_settings_and_save(
+                                            PersistedSettings(
+                                                audio_output_mode=settings.audio_output_mode,
+                                                music_import_dir=settings.music_import_dir,
+                                                last_connected_bt_address=None,
+                                            )
+                                        )
+                                settings_last_result = action_result.message
+                                settings_bt_status = run_settings_action(
+                                    "bluetooth_adapter_status",
+                                    settings_actions.bluetooth_adapter_status,
+                                )
+                                refresh_settings_root_if_needed()
+                                if action == "bt_forget" and action_result.ok:
+                                    if len(settings_nav_stack) > 1:
+                                        settings_nav_stack.pop()
+                                    paired_result = run_settings_action(
+                                        "bluetooth_paired_devices",
+                                        settings_actions.bluetooth_paired_devices,
+                                    )
+                                    replace_current_settings_view(build_settings_bt_paired_view(paired_result))
+                                    current_view = _current_settings_view_name(settings_nav_stack)
+                                else:
+                                    replace_current_settings_view(
+                                        build_settings_bt_device_view(address, selected_hint=view.selected_idx)
+                                    )
+                                should_redraw = True
+                        elif view.view_id == "settings_music_sync":
+                            if action == "sync_music":
+                                sync_result = run_settings_action(
+                                    "sync_music_from_import",
+                                    settings_actions.sync_music_from_import,
+                                    Path(settings.music_import_dir),
+                                )
+                                settings_last_result = sync_result.message
+                                last_sync_result = sync_result.message
+                                _safe_scan_library(library)
+                                library_totals_label = _safe_library_totals_label(library)
+                                music_root_items = build_music_index(_safe_library_tracks(library))
+                                music_nav_stack = _restore_music_nav_stack(music_root_items, music_nav_stack)
+                                replace_current_settings_view(
+                                    build_settings_music_sync_view(selected_hint=view.selected_idx)
+                                )
+                                refresh_settings_root_if_needed()
+                                should_redraw = True
+                        elif view.view_id == "settings_audio":
+                            if action == "set_audio_mode":
+                                mode = str(selected_item.value or "").strip().lower()
+                                if mode in {"auto", "aux", "bluetooth"}:
+                                    set_settings_and_save(
+                                        PersistedSettings(
+                                            audio_output_mode=mode,
+                                            music_import_dir=settings.music_import_dir,
+                                            last_connected_bt_address=settings.last_connected_bt_address,
+                                        )
+                                    )
+                                    settings_last_result = f"Audio mode set to {mode}"
+                                    replace_current_settings_view(
+                                        build_settings_audio_view(selected_hint=view.selected_idx)
+                                    )
+                                    refresh_settings_root_if_needed()
+                                    should_redraw = True
+                        elif view.view_id == "settings_library":
+                            if action == "rebuild_library":
+                                report = _safe_scan_library(library)
+                                library_totals_label = _safe_library_totals_label(library)
+                                music_root_items = build_music_index(_safe_library_tracks(library))
+                                music_nav_stack = _restore_music_nav_stack(music_root_items, music_nav_stack)
+                                if report is None:
+                                    settings_last_result = "Library rebuild failed"
+                                else:
+                                    settings_last_result = (
+                                        f"Library rebuilt (+{report.added} ~{report.updated} -{report.removed})"
+                                    )
+                                should_redraw = True
+                        elif view.view_id == "settings_about":
+                            replace_current_settings_view(build_settings_about_view(selected_hint=view.selected_idx))
+                            should_redraw = True
                 elif current_view in ("music_root", "music_list") and event == "BACK":
                     if len(music_nav_stack) > 1:
                         music_nav_stack.pop()
                         current_view = _current_music_view_name(music_nav_stack)
+                    else:
+                        current_view = "menu"
+                        set_selected_label(footer_status_label(library_totals_label, player))
+                    should_redraw = True
+                elif current_view in ("settings_root", "settings_list") and event == "BACK":
+                    if len(settings_nav_stack) > 1:
+                        settings_nav_stack.pop()
+                        current_view = _current_settings_view_name(settings_nav_stack)
                     else:
                         current_view = "menu"
                         set_selected_label(footer_status_label(library_totals_label, player))
@@ -2215,13 +3120,30 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                             now_playing_song_scroll_px += steps * NOW_PLAYING_TITLE_SCROLL_STEP_PX
                             should_redraw = True
 
-            footer_label = footer_status_label(library_totals_label, player)
+            if current_view in ("settings_root", "settings_list"):
+                refresh_settings_root_if_needed()
+                if refresh_selected_settings_scroll_state():
+                    should_redraw = True
+                elif settings_item_should_scroll:
+                    now_tick = now_clock()
+                    if now_tick - settings_item_scroll_start_tick >= SETTINGS_ITEM_SCROLL_DELAY_S:
+                        elapsed = now_tick - settings_item_last_scroll_tick
+                        steps = int(elapsed / SETTINGS_ITEM_SCROLL_INTERVAL_S)
+                        if steps > 0:
+                            settings_item_last_scroll_tick += steps * SETTINGS_ITEM_SCROLL_INTERVAL_S
+                            settings_item_scroll_px += steps * SETTINGS_ITEM_SCROLL_STEP_PX
+                            should_redraw = True
+                footer_label = _settings_footer_label(settings_nav_stack, settings_last_result)
+            else:
+                if settings_item_scroll_key:
+                    set_settings_item_scroll_key("", "", 0)
+                footer_label = footer_status_label(library_totals_label, player)
             if footer_label != selected_label:
                 set_selected_label(footer_label)
-                if current_view in ("menu", "music_root", "music_list"):
+                if current_view in ("menu", "music_root", "music_list", "settings_root", "settings_list"):
                     should_redraw = True
 
-            if current_view in ("menu", "music_root", "music_list") and footer_should_scroll:
+            if current_view in ("menu", "music_root", "music_list", "settings_root", "settings_list") and footer_should_scroll:
                 elapsed = now_clock() - footer_last_scroll_tick
                 steps = int(elapsed / FOOTER_SCROLL_INTERVAL_S)
                 if steps > 0:
@@ -2254,6 +3176,17 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                         status_plumbing.charge_anim_frame(),
                         selected_label=selected_label,
                         footer_scroll_px=footer_scroll_px,
+                    )
+                elif current_view in ("settings_root", "settings_list"):
+                    image = render_settings_browser(
+                        epd,
+                        fonts,
+                        _current_settings_view(settings_nav_stack),
+                        status,
+                        status_plumbing.charge_anim_frame(),
+                        selected_label=selected_label,
+                        footer_scroll_px=footer_scroll_px,
+                        selected_item_scroll_px=settings_item_scroll_px,
                     )
                 else:
                     image = render_menu(

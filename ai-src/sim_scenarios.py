@@ -74,6 +74,18 @@ SCENARIOS: dict[str, list[str]] = {
         "BACK",
         "QUIT",
     ],
+    "settings_smoke": [
+        "DOWN",
+        "DOWN",
+        "DOWN",  # Settings
+        "SELECT",  # enter settings root
+        "DOWN",  # Music Sync
+        "SELECT",
+        "SELECT",  # Sync From Import Folder
+        "BACK",
+        "BACK",
+        "QUIT",
+    ],
 }
 
 

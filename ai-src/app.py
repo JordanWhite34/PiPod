@@ -20,6 +20,8 @@ from pipod_runtime import (
     sync_audio_output,
 )
 from player import MusicPlayer
+from settings_actions import SettingsActions
+from settings_store import SettingsStore
 
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parent
@@ -88,6 +90,8 @@ def main():
             event_provider=event_provider,
             fonts=fonts,
             status_plumbing=status_plumbing,
+            settings_store=SettingsStore(),
+            settings_actions=SettingsActions(music_dir=MUSIC_DIR),
         )
 
         stats = run_pipod_loop(config, dependencies)
