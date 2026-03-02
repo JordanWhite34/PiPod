@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import Iterable
 import unicodedata
 
-from mutagen import File as MutagenFile
+try:
+    from mutagen import File as MutagenFile
+except Exception:  # pragma: no cover - runtime dependency check
+    MutagenFile = None
 
 SUPPORTED_AUDIO_EXTENSIONS = {
     ".aac",
@@ -87,6 +90,8 @@ class MusicLibrary:
         updated = 0
         skipped = 0
         total_files = 0
+        metadata_fallback_count = 0
+        metadata_fallback_examples: list[str] = []
 
         with self._conn:
             self._repair_stored_paths()
@@ -111,7 +116,12 @@ class MusicLibrary:
                     skipped += 1
                     continue
 
-                title, artist, album, track_no, duration_s = self._extract_track_metadata(path)
+                metadata, metadata_error = self._extract_track_metadata(path)
+                if metadata_error is not None:
+                    metadata_fallback_count += 1
+                    if len(metadata_fallback_examples) < 3:
+                        metadata_fallback_examples.append(f"{path.name}: {metadata_error}")
+                title, artist, album, track_no, duration_s = metadata
                 self._conn.execute(
                     """
                     INSERT INTO tracks(path, mtime_ns, size_bytes, title, artist, album, track_no, duration_s)
@@ -148,6 +158,14 @@ class MusicLibrary:
                     "DELETE FROM tracks WHERE path = ?",
                     [(path_str,) for path_str in missing_paths],
                 )
+
+        if metadata_fallback_count > 0:
+            summary = "; ".join(metadata_fallback_examples)
+            logging.info(
+                "Metadata tags unavailable for %d track(s); using filename defaults%s",
+                metadata_fallback_count,
+                f". Examples: {summary}" if summary else "",
+            )
 
         return ScanReport(
             total_files=total_files,
@@ -262,17 +280,20 @@ class MusicLibrary:
         return audio_files
 
     @staticmethod
-    def _extract_track_metadata(path: Path) -> tuple[str, str, str, int, int]:
+    def _extract_track_metadata(path: Path) -> tuple[tuple[str, str, str, int, int], str | None]:
         title = path.stem
         artist = UNKNOWN_ARTIST
         album = UNKNOWN_ALBUM
         track_no = 0
         duration_s = 0
 
+        if MutagenFile is None:
+            return (title, artist, album, track_no, duration_s), "mutagen unavailable"
+
         try:
             audio = MutagenFile(path, easy=True)
             if audio is None:
-                return title, artist, album, track_no, duration_s
+                return (title, artist, album, track_no, duration_s), "unsupported audio metadata"
 
             title = _clean_text(_first_tag_value(audio, "title"), fallback=title)
             artist = _clean_text(_first_tag_value(audio, "artist"), fallback=artist)
@@ -281,10 +302,9 @@ class MusicLibrary:
 
             length = getattr(audio.info, "length", 0) if getattr(audio, "info", None) else 0
             duration_s = max(0, int(round(length or 0)))
+            return (title, artist, album, track_no, duration_s), None
         except Exception as exc:
-            logging.warning("Metadata read failed for %s: %s", path, exc)
-
-        return title, artist, album, track_no, duration_s
+            return (title, artist, album, track_no, duration_s), str(exc)
 
 
 def _first_tag_value(audio, key: str) -> str | None:

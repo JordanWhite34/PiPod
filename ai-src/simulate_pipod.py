@@ -118,8 +118,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--audio",
         choices=["mock", "real"],
-        default="mock",
-        help="Use deterministic mock audio or real pygame-backed audio",
+        default="real",
+        help="Use real library/audio when available (default) or deterministic mock audio",
     )
     parser.add_argument(
         "--scenario",

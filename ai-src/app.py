@@ -46,6 +46,9 @@ def main():
         status_plumbing = StatusPlumbing()
         status = status_plumbing.read()
 
+        MUSIC_DIR.mkdir(parents=True, exist_ok=True)
+        logging.info("Music folder ready: %s", MUSIC_DIR)
+
         library = MusicLibrary(music_root=MUSIC_DIR, db_path=LIBRARY_DB_PATH)
         player = MusicPlayer()
         sync_audio_output(status, player)

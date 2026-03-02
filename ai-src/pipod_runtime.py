@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import io
+import json
 import logging
+import os
 import select
 import sys
 import time
@@ -26,7 +28,12 @@ FONT_PATH = PIC_DIR / "Font.ttc"
 ICONS_DIR = APP_DIR / "assets" / "icons"
 SHUFFLE_ICON_PATH = ICONS_DIR / "shuffle_thick.png"
 LOOP_ICON_PATH = ICONS_DIR / "loop.png"
-MUSIC_DIR = Path("/home/jrwhite/Music")
+MUSIC_DIR_ENV_VAR = "PIPOD_MUSIC_DIR"
+DEFAULT_MUSIC_DIR = ROOT_DIR / "music"
+PLAYLISTS_MANIFEST_NAME = "playlists.json"
+MUSIC_DIR = Path(
+    os.getenv(MUSIC_DIR_ENV_VAR, str(DEFAULT_MUSIC_DIR))
+).expanduser().resolve()
 DATA_DIR = ROOT_DIR / "data"
 LIBRARY_DB_PATH = DATA_DIR / "library.db"
 
@@ -402,17 +409,228 @@ def _song_item(entry: MusicTrackEntry, *, item_id: str, label: str) -> MusicItem
     )
 
 
-def build_music_index(tracks: Sequence) -> tuple[MusicItem, ...]:
-    entries = _coerce_music_entries(tracks)
-    all_paths = tuple(entry.path for entry in entries)
+def _playlist_item_id(label: str, seen: dict[str, int]) -> str:
+    slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in str(label))
+    slug = slug.strip("_") or "playlist"
+    count = seen.get(slug, 0) + 1
+    seen[slug] = count
+    if count > 1:
+        slug = f"{slug}_{count}"
+    return f"playlist:user:{slug}"
 
-    all_songs_playlist = MusicItem(
-        id="playlist:all_songs",
-        label="All Songs",
+
+def _normalize_playlist_track_paths(paths: Sequence) -> tuple[Path, ...]:
+    normalized: list[Path] = []
+    seen: set[Path] = set()
+    for raw_path in paths:
+        path = Path(raw_path)
+        if path in seen:
+            continue
+        seen.add(path)
+        normalized.append(path)
+    return tuple(normalized)
+
+
+def _playlist_song_item(
+    *,
+    playlist_item_id: str,
+    index: int,
+    path: Path,
+    entry_by_path: dict[Path, MusicTrackEntry],
+) -> MusicItem:
+    entry = entry_by_path.get(path)
+    if entry is None:
+        label = path.stem
+    else:
+        label = f"{entry.title} - {entry.artist}"
+    return MusicItem(
+        id=f"{playlist_item_id}:song:{index}",
+        label=label,
+        icon=MUSIC_ICON_SONG,
+        kind="song",
+        track_paths=(path,),
+        child_items=(),
+    )
+
+
+def _playlist_browser_item(
+    *,
+    item_id: str,
+    label: str,
+    track_paths: Sequence[Path],
+    entry_by_path: dict[Path, MusicTrackEntry],
+) -> MusicItem:
+    normalized_paths = _normalize_playlist_track_paths(track_paths)
+    play_all_item = MusicItem(
+        id=f"{item_id}:play_all",
+        label="Play All",
         icon=MUSIC_ICON_PLAYLIST,
         kind="playlist",
-        track_paths=all_paths,
+        track_paths=normalized_paths,
         child_items=(),
+    )
+    song_items = tuple(
+        _playlist_song_item(
+            playlist_item_id=item_id,
+            index=index,
+            path=path,
+            entry_by_path=entry_by_path,
+        )
+        for index, path in enumerate(normalized_paths, start=1)
+    )
+    return MusicItem(
+        id=item_id,
+        label=label,
+        icon=MUSIC_ICON_PLAYLIST,
+        kind="playlist_group",
+        track_paths=normalized_paths,
+        child_items=(play_all_item, *song_items),
+    )
+
+
+def _resolve_playlist_entry_path(
+    raw_entry,
+    *,
+    music_root: Path,
+    abs_lookup: dict[str, Path],
+    abs_lookup_folded: dict[str, Path],
+    rel_lookup: dict[str, Path],
+    rel_lookup_folded: dict[str, Path],
+) -> Path | None:
+    if not isinstance(raw_entry, str):
+        return None
+    raw_value = raw_entry.strip()
+    if not raw_value:
+        return None
+
+    path_value = Path(raw_value).expanduser()
+    if path_value.is_absolute():
+        absolute_key = str(path_value.resolve())
+        return abs_lookup.get(absolute_key) or abs_lookup_folded.get(absolute_key.casefold())
+
+    rel_key = raw_value.replace("\\", "/")
+    while rel_key.startswith("./"):
+        rel_key = rel_key[2:]
+    rel_key = rel_key.lstrip("/")
+    if not rel_key:
+        return None
+
+    direct = rel_lookup.get(rel_key)
+    if direct is not None:
+        return direct
+    folded = rel_lookup_folded.get(rel_key.casefold())
+    if folded is not None:
+        return folded
+
+    absolute_key = str((music_root / rel_key).resolve())
+    return abs_lookup.get(absolute_key) or abs_lookup_folded.get(absolute_key.casefold())
+
+
+def load_playlists_manifest(music_root: Path, tracks: Sequence) -> tuple[tuple[str, tuple[Path, ...]], ...]:
+    manifest_path = Path(music_root).expanduser().resolve() / PLAYLISTS_MANIFEST_NAME
+    if not manifest_path.exists():
+        return ()
+
+    try:
+        raw_text = manifest_path.read_text(encoding="utf-8").strip()
+    except Exception as exc:
+        logging.warning("Unable to read playlists manifest %s: %s", manifest_path, exc)
+        return ()
+
+    if not raw_text:
+        return ()
+
+    try:
+        raw_manifest = json.loads(raw_text)
+    except Exception as exc:
+        logging.warning("Invalid JSON in playlists manifest %s: %s", manifest_path, exc)
+        return ()
+
+    if not isinstance(raw_manifest, dict):
+        logging.warning("Ignoring playlists manifest %s: top-level object must be a map", manifest_path)
+        return ()
+
+    raw_playlists = raw_manifest.get("playlists", raw_manifest)
+    if not isinstance(raw_playlists, dict):
+        logging.warning("Ignoring playlists manifest %s: 'playlists' must be a map", manifest_path)
+        return ()
+
+    manifest_root = manifest_path.parent
+    abs_lookup: dict[str, Path] = {}
+    abs_lookup_folded: dict[str, Path] = {}
+    rel_lookup: dict[str, Path] = {}
+    rel_lookup_folded: dict[str, Path] = {}
+    for track in tracks:
+        raw_path = getattr(track, "path", None)
+        if raw_path is None:
+            continue
+        path = Path(raw_path)
+        absolute_key = str(path.resolve())
+        abs_lookup[absolute_key] = path
+        abs_lookup_folded[absolute_key.casefold()] = path
+        try:
+            rel_key = path.resolve().relative_to(manifest_root).as_posix()
+        except Exception:
+            continue
+        rel_lookup[rel_key] = path
+        rel_lookup_folded[rel_key.casefold()] = path
+
+    playlists: list[tuple[str, tuple[Path, ...]]] = []
+    for raw_name, raw_entries in raw_playlists.items():
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        if not isinstance(raw_entries, list):
+            logging.warning("Ignoring playlist '%s': expected a list of track paths", name)
+            continue
+
+        resolved_paths: list[Path] = []
+        seen_paths: set[Path] = set()
+        for raw_entry in raw_entries:
+            resolved = _resolve_playlist_entry_path(
+                raw_entry,
+                music_root=manifest_root,
+                abs_lookup=abs_lookup,
+                abs_lookup_folded=abs_lookup_folded,
+                rel_lookup=rel_lookup,
+                rel_lookup_folded=rel_lookup_folded,
+            )
+            if resolved is None or resolved in seen_paths:
+                continue
+            seen_paths.add(resolved)
+            resolved_paths.append(resolved)
+        playlists.append((name, tuple(resolved_paths)))
+
+    return tuple(playlists)
+
+
+def build_music_index(
+    tracks: Sequence,
+    playlists: Sequence[tuple[str, Sequence[Path]]] | None = None,
+) -> tuple[MusicItem, ...]:
+    entries = _coerce_music_entries(tracks)
+    all_paths = tuple(entry.path for entry in entries)
+    entry_by_path = {entry.path: entry for entry in entries}
+
+    playlist_items: list[MusicItem] = []
+    playlist_slug_counts: dict[str, int] = {}
+    for label, track_paths in playlists or ():
+        item_label = str(label).strip() or "Playlist"
+        item_id = _playlist_item_id(item_label, playlist_slug_counts)
+        playlist_items.append(
+            _playlist_browser_item(
+                item_id=item_id,
+                label=item_label,
+                track_paths=track_paths,
+                entry_by_path=entry_by_path,
+            )
+        )
+
+    all_songs_playlist = _playlist_browser_item(
+        item_id="playlist:all_songs",
+        label="All Songs",
+        track_paths=all_paths,
+        entry_by_path=entry_by_path,
     )
     shuffle_all_playlist = MusicItem(
         id="playlist:shuffle_all",
@@ -422,7 +640,7 @@ def build_music_index(tracks: Sequence) -> tuple[MusicItem, ...]:
         track_paths=(),
         child_items=(),
     )
-    playlists_items = (all_songs_playlist, shuffle_all_playlist)
+    playlists_items = tuple(playlist_items + [all_songs_playlist, shuffle_all_playlist])
 
     artist_map: dict[str, dict[str, list[MusicTrackEntry]]] = {}
     for entry in entries:
@@ -2379,6 +2597,16 @@ def _safe_library_totals_label(library):
         return "0 artists | 0 songs | 0 albums"
 
 
+def _library_music_root(library) -> Path | None:
+    try:
+        raw_music_root = getattr(library, "music_root", None)
+        if raw_music_root is None:
+            return None
+        return Path(raw_music_root).expanduser().resolve()
+    except Exception:
+        return None
+
+
 def _safe_now_playing_label(player):
     label_fn = getattr(player, "now_playing_label", None)
     if callable(label_fn):
@@ -2500,6 +2728,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
     selected_idx = 0
     current_view = "menu"
     selected_label = None
+    library_totals_label = "0 artists | 0 songs | 0 albums"
     music_root_items: tuple[MusicItem, ...] = ()
     music_nav_stack: list[MusicViewState] = []
     settings_nav_stack: list[SettingsViewState] = []
@@ -2744,14 +2973,24 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
         _safe_save_settings(settings_store, settings)
         refresh_settings_root_if_needed()
 
+    def rebuild_music_index_and_nav(*, scan_library: bool = False):
+        nonlocal library_totals_label
+        nonlocal music_root_items
+        nonlocal music_nav_stack
+        if scan_library:
+            _safe_scan_library(library)
+        tracks = _safe_library_tracks(library)
+        music_root = _library_music_root(library)
+        manifest_playlists = load_playlists_manifest(music_root, tracks) if music_root is not None else ()
+        library_totals_label = _safe_library_totals_label(library)
+        music_root_items = build_music_index(tracks, playlists=manifest_playlists)
+        music_nav_stack = _restore_music_nav_stack(music_root_items, music_nav_stack)
+
     try:
         status = status_plumbing.read()
         sync_audio_output(status, player)
 
-        _safe_scan_library(library)
-        library_totals_label = _safe_library_totals_label(library)
-        music_root_items = build_music_index(_safe_library_tracks(library))
-        music_nav_stack = _restore_music_nav_stack(music_root_items)
+        rebuild_music_index_and_nav(scan_library=True)
 
         if config.initialize_display:
             logging.info("Initializing display")
@@ -3016,10 +3255,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                                 )
                                 settings_last_result = sync_result.message
                                 last_sync_result = sync_result.message
-                                _safe_scan_library(library)
-                                library_totals_label = _safe_library_totals_label(library)
-                                music_root_items = build_music_index(_safe_library_tracks(library))
-                                music_nav_stack = _restore_music_nav_stack(music_root_items, music_nav_stack)
+                                rebuild_music_index_and_nav(scan_library=True)
                                 replace_current_settings_view(
                                     build_settings_music_sync_view(selected_hint=view.selected_idx)
                                 )
@@ -3045,9 +3281,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                         elif view.view_id == "settings_library":
                             if action == "rebuild_library":
                                 report = _safe_scan_library(library)
-                                library_totals_label = _safe_library_totals_label(library)
-                                music_root_items = build_music_index(_safe_library_tracks(library))
-                                music_nav_stack = _restore_music_nav_stack(music_root_items, music_nav_stack)
+                                rebuild_music_index_and_nav(scan_library=False)
                                 if report is None:
                                     settings_last_result = "Library rebuild failed"
                                 else:
@@ -3081,10 +3315,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                 elif event == "PREV_TRACK":
                     should_redraw = player.previous_track() or should_redraw
                 elif event == "RESCAN_LIBRARY":
-                    _safe_scan_library(library)
-                    library_totals_label = _safe_library_totals_label(library)
-                    music_root_items = build_music_index(_safe_library_tracks(library))
-                    music_nav_stack = _restore_music_nav_stack(music_root_items, music_nav_stack)
+                    rebuild_music_index_and_nav(scan_library=True)
                     if current_view in ("music_root", "music_list"):
                         current_view = _current_music_view_name(music_nav_stack)
                     should_redraw = True

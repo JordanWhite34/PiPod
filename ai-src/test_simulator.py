@@ -6,6 +6,7 @@ import os
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -33,6 +34,7 @@ from pipod_runtime import (
     VOLUME_SLIDER_KNOB_CENTER_Y_OFFSET,
     _volume_slider_knob_x,
     build_music_index,
+    load_playlists_manifest,
     load_fonts,
     parse_input_token,
     render_settings_browser,
@@ -404,6 +406,48 @@ class ScriptedEventProvider:
 
 
 class MusicBrowserTests(unittest.TestCase):
+    def test_load_playlists_manifest_resolves_relative_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            music_root = Path(temp_dir) / "music"
+            track_a = music_root / "Artist One" / "Album One" / "01 Song A.mp3"
+            track_b = music_root / "Artist One" / "Album One" / "02 Song B.mp3"
+            (music_root / "Artist One" / "Album One").mkdir(parents=True, exist_ok=True)
+            manifest = {
+                "playlists": {
+                    "Road Trip": [
+                        "Artist One/Album One/01 Song A.mp3",
+                        "./Artist One/Album One/02 Song B.mp3",
+                        "missing/song.mp3",
+                        "Artist One/Album One/01 Song A.mp3",
+                    ]
+                }
+            }
+            (music_root / "playlists.json").write_text(json.dumps(manifest), encoding="utf-8")
+            tracks = [
+                SimpleNamespace(path=track_a),
+                SimpleNamespace(path=track_b),
+            ]
+
+            playlists = load_playlists_manifest(music_root, tracks)
+            self.assertEqual(len(playlists), 1)
+            self.assertEqual(playlists[0][0], "Road Trip")
+            self.assertEqual(playlists[0][1], (track_a, track_b))
+
+    def test_build_music_index_includes_custom_playlists(self):
+        fixture_library = FixtureLibrary(FIXTURE_PATH, seed=1337)
+        tracks = fixture_library.all_tracks()
+        fixture_library.close()
+
+        custom_playlist_paths = (tracks[0].path, tracks[1].path)
+        root_items = build_music_index(
+            tracks,
+            playlists=(("Road Trip", custom_playlist_paths),),
+        )
+        playlists_root = root_items[0]
+        playlist_labels = [item.label for item in playlists_root.child_items]
+        self.assertEqual(playlist_labels[:3], ["Road Trip", "All Songs", "Shuffle All"])
+        self.assertEqual(playlists_root.child_items[0].track_paths, custom_playlist_paths)
+
     def _run_scripted(self, events: list[str]) -> tuple[dict, MockPlayer]:
         library = FixtureLibrary(FIXTURE_PATH, seed=1337)
         player = MockPlayer(seed=1337)
@@ -522,6 +566,40 @@ class MusicBrowserTests(unittest.TestCase):
         self.assertEqual(stats["final_view"], "music_list")
         self.assertIsNotNone(player.current_track_path())
         self.assertTrue(player.state().is_shuffle)
+
+    def test_all_songs_playlist_play_all_starts_playback(self):
+        stats, player = self._run_scripted(
+            [
+                "SELECT",  # Music root
+                "SELECT",  # Playlists
+                "SELECT",  # All Songs playlist entry
+                "SELECT",  # Play All
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "music_list")
+        self.assertIsNotNone(player.current_track_path())
+
+    def test_all_songs_playlist_song_selection_starts_selected_song(self):
+        fixture_library = FixtureLibrary(FIXTURE_PATH, seed=1337)
+        tracks = fixture_library.all_tracks()
+        fixture_library.close()
+        all_songs_view = build_music_index(tracks)[0].child_items[0].child_items
+        expected_path = Path(all_songs_view[2].track_paths[0])
+
+        stats, player = self._run_scripted(
+            [
+                "SELECT",  # Music root
+                "SELECT",  # Playlists
+                "SELECT",  # All Songs playlist entry
+                "DOWN",  # first song row
+                "DOWN",  # second song row
+                "SELECT",
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "music_list")
+        self.assertEqual(player.current_track_path(), expected_path)
 
     def test_back_navigation_returns_to_menu(self):
         stats, _ = self._run_scripted(

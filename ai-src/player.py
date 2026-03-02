@@ -3,8 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import os
 from pathlib import Path
 import random
+
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "hide")
 
 try:
     import pygame
@@ -19,6 +22,48 @@ except Exception:  # pragma: no cover - runtime dependency check
 
 def _clamp_volume_level(value: int) -> int:
     return max(0, min(10, int(value)))
+
+
+def _mixer_init_candidates() -> list[str | None]:
+    configured = os.getenv("PIPOD_SDL_AUDIODRIVER", "").strip()
+    if configured:
+        return [configured]
+
+    inherited = os.getenv("SDL_AUDIODRIVER", "").strip()
+    if inherited:
+        return [inherited]
+
+    # Default to auto-detect first, then force ALSA as a fallback on headless Pi builds.
+    return [None, "alsa"]
+
+
+def _init_mixer_with_fallback() -> tuple[bool, str]:
+    errors: list[str] = []
+    seen: set[str | None] = set()
+
+    for driver in _mixer_init_candidates():
+        if driver in seen:
+            continue
+        seen.add(driver)
+
+        if driver is None:
+            os.environ.pop("SDL_AUDIODRIVER", None)
+            label = "auto"
+        else:
+            os.environ["SDL_AUDIODRIVER"] = driver
+            label = driver
+
+        try:
+            pygame.mixer.init()
+            return True, label
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+            try:
+                pygame.mixer.quit()
+            except Exception:
+                pass
+
+    return False, " | ".join(errors)
 
 
 @dataclass(frozen=True)
@@ -58,8 +103,11 @@ class MusicPlayer:
             return
 
         try:
-            pygame.mixer.init()
+            initialized, backend = _init_mixer_with_fallback()
+            if not initialized:
+                raise RuntimeError(backend)
             self._available = True
+            self._backend = f"pygame/{backend}"
             self.set_volume_level(self._volume_level)
         except Exception as exc:
             self._backend = "unavailable"
