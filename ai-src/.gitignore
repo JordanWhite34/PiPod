@@ -1,2 +1,4 @@
 .lgd-nfy0
 sim-output/
+__pycache__/
+*.pyc

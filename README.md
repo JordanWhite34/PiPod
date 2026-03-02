@@ -1,111 +1,71 @@
-/*****************************************************************************
-* | File      	:   Readme_CN.txt
-* | Author      :   Waveshare team
-* | Function    :   Help with use
-* | Info        :
-*----------------
-* |	This version:   V1.0
-* | Date        :   2019-06-20
-* | Info        :   Here is an English version of the documentation for your quick use.
-******************************************************************************/
-This file is to help you use this Demo.
-Since our ink screens are getting more and more, it is not convenient for our maintenance, so all the ink screen programs are made into one project.
-A brief description of the use of this project is here:
+# PiPod
 
-1. Basic information:
-This Demo was developed based on the 2019-04-08-raspbian-stretch system image;
-This Demo has been verified on the Raspberry Pi 3B+;
-This Demo has been verified using the e-paper Driver HAT module. 
-You can view the corresponding test routines in the examples\ of the project;
+PiPod is a Raspberry Pi Zero 2 W music player runtime with an e-paper UI, GPIO 5-way navigation input, Bluetooth/music sync settings, and a local simulator + regression harness.
 
-2. Pin connection:
-Pin connections can be viewed in \lib\epdconfig.py and will be repeated here:
-EPD    =>    Jetson Nano/RPI(BCM)
-VCC    ->    3.3
-GND    ->    GND
-DIN    ->    10(SPI0_MOSI)
-CLK    ->    11(SPI0_SCK)
-CS     ->    8(SPI0_CS0)
-DC     ->    25
-RST    ->    17
-BUSY   ->    24
+This repository has been slimmed down to only the files needed for:
+- On-device runtime (`ai-src/app.py`)
+- Local simulator and automated regression tests (`ai-src/simulate_pipod.py`, `ai-src/test_simulator.py`)
 
-3.Installation library
-    sudo apt-get update
-    sudo apt-get install python-pip
-    sudo apt-get install python-pil
-    sudo pip install RPi.GPIO
+## Project Layout
+- `ai-src/app.py`: device entrypoint (e-paper + GPIO + runtime loop)
+- `ai-src/pipod_runtime.py`: UI/rendering/application loop
+- `ai-src/library.py`: music indexer (`sqlite`) and metadata extraction
+- `ai-src/player.py`: queue-based audio playback wrapper
+- `ai-src/input_provider.py`: keyboard + GPIO event providers
+- `ai-src/settings_store.py`: persisted settings (`data/settings.json`)
+- `ai-src/settings_actions.py`: Bluetooth and music sync actions
+- `ai-src/simulate_pipod.py`: simulator/scenario runner
+- `ai-src/test_simulator.py`: regression tests for runtime/simulator behavior
+- `ai-src/simulator_adapters.py`: fake EPD/player/library/settings adapters
+- `lib/waveshare_epd/`: minimal display driver set for current target panel
+- `pic/Font.ttc`: runtime UI font
+- `data/sim_tracks.json`: deterministic simulator fixture catalog
 
-or
+## Device Runtime
+Run on device:
 
-    sudo apt-get update
-    sudo apt-get install python3-pip
-    sudo apt-get install python3-pil
-    sudo pip3 install RPi.GPIO
+```bash
+python3 ai-src/app.py
+```
 
-4. Basic use:
-Since this project is a comprehensive project, you may need to read the following for use:
-You can view the test program in the examples\ directory.
-Please note which ink screen you purchased.
-Example 1:
-     If you purchased 5.83inch e-paper, then you should execute the command:
-     Sudo python epd_5in83_test.py
-Example 2:
-     If you buy a 2.9inch e-paper (B), since the 2.9-inch Type B and Type C are common driver codes,
-     Then you should execute the command:
-     Sudo python epd_2in9bc_test.py
-    
-Note: For epd_1in54_V2_test.py and epd_2in13_V2_test.py, please note that the V2 logo is attached to the back of your screen.
-
------------------------------------------------------------------------------
-PiPod Runtime Settings (ai-src)
------------------------------------------------------------------------------
-
-The PiPod runtime now includes a full in-device Settings page.
-
-Main menu:
+Runtime menu:
 - Music
 - Now Playing
 - Shuffle All
 - Settings
 
-Settings sections:
-- Bluetooth
-  - Scan & Pair Headphones
-  - Paired Devices
-  - Adapter Status
-- Music Sync
-  - Sync From Import Folder
-  - Import Folder Path
-  - Last Sync Result
-- Audio Output
-  - Auto / AUX / Bluetooth
-- Library
-  - Rebuild Library Index
-- About
-  - Runtime/system status summary
-
 Controls:
-- `u` / `d` to move
-- `s` or `right` to select
-- `b` or `left` to go back
-- In Settings lists, the selected row text starts horizontal scrolling after 1 second if it is too long.
+- `u` / `d` move selection
+- `s` or `right` select
+- `b` or `left` go back
+- `q` quit
 
 Settings persistence:
-- Stored in `data/settings.json`
-- Keys:
-  - `audio_output_mode`
-  - `music_import_dir`
-  - `last_connected_bt_address`
+- `data/settings.json`
+- Keys: `audio_output_mode`, `music_import_dir`, `last_connected_bt_address`
 
-Music sync workflow:
-1. Copy audio files from your computer into the device import folder
-   (default: `/home/jrwhite/PiPodSync/inbox`).
-2. On PiPod go to: `Settings > Music Sync > Sync From Import Folder`.
-3. PiPod copies supported audio files into the music library root and rescans.
-4. Result summary is shown in the footer and Last Sync Result row.
+## Simulator And Regression
+Run tests:
 
-Bluetooth notes:
-- Bluetooth actions use `bluetoothctl` when available.
-- If `bluetoothctl` is not installed, Bluetooth pages remain available and show
-  clear unavailable messages instead of crashing.
+```bash
+python3 ai-src/test_simulator.py
+```
+
+Run scripted scenarios:
+
+```bash
+python3 ai-src/simulate_pipod.py --mode scenario --scenario all --no-frames
+```
+
+## Removed Legacy Files
+Legacy vendor demo content and duplicate/unused code were intentionally removed, including:
+- Extra Waveshare panel drivers and sample images not used by PiPod runtime
+- Tracked bytecode/caches (`*.pyc`, `__pycache__/`)
+- Duplicate standalone player demo (`src/player.py`)
+- Legacy Waveshare demo script (`ai-src/test.py`)
+- Generated library DB artifact (`data/library.db`)
+
+Only the current runtime target driver files are kept in `lib/waveshare_epd`:
+- `__init__.py`
+- `epdconfig.py`
+- `epd2in13_V4.py`

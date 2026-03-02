@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+data/library.db
+data/settings.json
+ai-src/sim-output/
