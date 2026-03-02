@@ -28,6 +28,11 @@ Run on device:
 python3 ai-src/app.py
 ```
 
+Run live preview simulation for development:
+```bash
+python3 ai-src/simulate_pipod.py --mode interactive --live-preview
+```
+
 ### Raspberry Pi Zero 2 W + I2S DAC Quick Setup
 
 If your DAC is wired as:
