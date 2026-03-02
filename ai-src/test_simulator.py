@@ -282,6 +282,7 @@ class InputParsingTests(unittest.TestCase):
 
     def test_parse_input_token_keeps_existing_shortcuts(self):
         self.assertEqual(parse_input_token("r"), "RESCAN_LIBRARY")
+        self.assertEqual(parse_input_token("t"), "TOGGLE_ART_MODE")
         self.assertEqual(parse_input_token("u"), "UP")
         self.assertEqual(parse_input_token("d"), "DOWN")
         self.assertEqual(parse_input_token("s"), "SELECT")
@@ -657,6 +658,19 @@ class MusicBrowserTests(unittest.TestCase):
         self.assertIsNotNone(player.current_track_path())
         self.assertFalse(player.state().is_shuffle)
 
+    def test_now_playing_toggle_art_mode_triggers_redraw(self):
+        stats, _ = self._run_scripted(
+            [
+                "DOWN",  # Now Playing
+                "RIGHT",  # enter now playing
+                "TOGGLE_ART_MODE",
+                "TOGGLE_ART_MODE",
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "now_playing")
+        self.assertGreaterEqual(stats["frames_partial"], 4)
+
     def test_play_pause_from_empty_queue_starts_random_without_shuffle(self):
         stats, player = self._run_scripted(
             [
@@ -727,6 +741,7 @@ class SettingsStoreTests(unittest.TestCase):
                 audio_output_mode="bluetooth",
                 music_import_dir="/tmp/import",
                 last_connected_bt_address="AA:BB:CC:DD:EE:FF",
+                album_art_mode="classic",
             )
             store.save(expected)
             actual = store.load()
@@ -748,6 +763,24 @@ class SettingsStoreTests(unittest.TestCase):
             store = SettingsStore(settings_path)
             settings = store.load()
             self.assertEqual(settings.audio_output_mode, "aux")
+
+    def test_settings_store_invalid_album_art_mode_defaults_to_enhanced(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "audio_output_mode": "auto",
+                        "music_import_dir": "/tmp/import",
+                        "last_connected_bt_address": None,
+                        "album_art_mode": "invalid",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            store = SettingsStore(settings_path)
+            settings = store.load()
+            self.assertEqual(settings.album_art_mode, "enhanced")
 
 
 class SettingsActionsTests(unittest.TestCase):
@@ -864,6 +897,26 @@ class RuntimeSettingsFlowTests(unittest.TestCase):
         library, _ = state
         self.assertEqual(stats["final_view"], "settings_list")
         self.assertGreaterEqual(library.scan_calls, 2)
+
+    def test_settings_album_art_mode_persists(self):
+        stats, _, state = self._run_scripted(
+            [
+                "DOWN",
+                "DOWN",
+                "DOWN",  # Settings
+                "SELECT",
+                "DOWN",
+                "DOWN",
+                "DOWN",  # Album Art
+                "SELECT",
+                "DOWN",  # Classic
+                "SELECT",
+                "QUIT",
+            ]
+        )
+        _, persisted = state
+        self.assertEqual(stats["final_view"], "settings_list")
+        self.assertEqual(persisted.album_art_mode, "classic")
 
     def test_unavailable_bluetooth_actions_do_not_crash(self):
         class UnavailableSettingsActions(FakeSettingsActions):

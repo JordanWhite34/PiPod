@@ -11,6 +11,7 @@ DATA_DIR = ROOT_DIR / "data"
 DEFAULT_SETTINGS_PATH = DATA_DIR / "settings.json"
 DEFAULT_IMPORT_DIR = "/home/jrwhite/PiPodSync/inbox"
 VALID_AUDIO_OUTPUT_MODES = {"auto", "aux", "bluetooth"}
+VALID_ALBUM_ART_MODES = {"enhanced", "classic"}
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,7 @@ class PersistedSettings:
     audio_output_mode: str = "auto"
     music_import_dir: str = DEFAULT_IMPORT_DIR
     last_connected_bt_address: str | None = None
+    album_art_mode: str = "enhanced"
 
     @classmethod
     def from_raw(cls, raw: dict | None) -> "PersistedSettings":
@@ -39,10 +41,15 @@ class PersistedSettings:
             if not last_bt:
                 last_bt = None
 
+        album_art_mode = str(raw.get("album_art_mode", "enhanced") or "enhanced").strip().lower()
+        if album_art_mode not in VALID_ALBUM_ART_MODES:
+            album_art_mode = "enhanced"
+
         return cls(
             audio_output_mode=mode,
             music_import_dir=import_dir,
             last_connected_bt_address=last_bt,
+            album_art_mode=album_art_mode,
         )
 
 

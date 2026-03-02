@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from settings_actions import BluetoothDevice, SettingsActionResult, SettingsActions
 from settings_store import PersistedSettings, SettingsStore
 
@@ -47,7 +47,7 @@ MENU_ITEMS = [
 ]
 
 DEFAULT_FOOTER_TEXT = "u/d/s q p n r"
-NOW_PLAYING_FOOTER_TEXT = "b back  q quit"
+NOW_PLAYING_FOOTER_TEXT = "b back  t art  q quit"
 FOOTER_SCROLL_INTERVAL_S = 0.16
 FOOTER_SCROLL_STEP_PX = 1
 FOOTER_SCROLL_GAP_PX = 24
@@ -79,6 +79,14 @@ FOLDER_ART_NAMES = (
     "front.jpeg",
     "front.png",
 )
+ALBUM_ART_AUTOCONTRAST_CUTOFF = 2
+ALBUM_ART_UNSHARP_RADIUS = 1.0
+ALBUM_ART_UNSHARP_PERCENT = 180
+ALBUM_ART_UNSHARP_THRESHOLD = 2
+ALBUM_ART_GAMMA = 0.92
+ALBUM_ART_MODE_ENHANCED = "enhanced"
+ALBUM_ART_MODE_CLASSIC = "classic"
+DEFAULT_ALBUM_ART_MODE = ALBUM_ART_MODE_ENHANCED
 _MODE_ICON_MASK_CACHE: dict[tuple[str, int, int], Image.Image | None] = {}
 UNKNOWN_ARTIST = "Unknown Artist"
 UNKNOWN_ALBUM = "Unknown Album"
@@ -210,6 +218,7 @@ INPUT_TOKEN_MAPPING = {
     "n": "NEXT_TRACK",
     "k": "PREV_TRACK",
     "r": "RESCAN_LIBRARY",
+    "t": "TOGGLE_ART_MODE",
 }
 
 
@@ -899,6 +908,13 @@ def _settings_root_items(
             action="open_audio_output",
         ),
         SettingsItem(
+            id="settings:album_art",
+            label=f"Album Art ({settings.album_art_mode})",
+            kind="submenu",
+            help_text="Set album art render style",
+            action="open_album_art",
+        ),
+        SettingsItem(
             id="settings:library",
             label="Library",
             kind="submenu",
@@ -1077,6 +1093,24 @@ def _settings_audio_output_items(settings: PersistedSettings) -> tuple[SettingsI
     )
 
 
+def _settings_album_art_items(settings: PersistedSettings) -> tuple[SettingsItem, ...]:
+    def mode_item(mode: str, label: str) -> SettingsItem:
+        marker = "[x]" if settings.album_art_mode == mode else "[ ]"
+        return SettingsItem(
+            id=f"settings:album_art:{mode}",
+            label=f"{marker} {label}",
+            kind="action",
+            help_text=f"Set album art mode to {label.lower()}",
+            action="set_album_art_mode",
+            value=mode,
+        )
+
+    return (
+        mode_item(ALBUM_ART_MODE_ENHANCED, "Enhanced"),
+        mode_item(ALBUM_ART_MODE_CLASSIC, "Classic"),
+    )
+
+
 def _settings_library_items() -> tuple[SettingsItem, ...]:
     return (
         SettingsItem(
@@ -1188,9 +1222,11 @@ def _extract_cover_art_bytes(track_path):
     return None
 
 
-def load_album_art(track_path, size, cache):
-    if track_path in cache:
-        return cache[track_path]
+def load_album_art(track_path, size, cache, render_mode: str = DEFAULT_ALBUM_ART_MODE):
+    mode = _normalize_album_art_mode(render_mode)
+    cache_key = (track_path, mode)
+    if cache_key in cache:
+        return cache[cache_key]
 
     art_image = None
     art_bytes = _extract_cover_art_bytes(track_path)
@@ -1210,15 +1246,14 @@ def load_album_art(track_path, size, cache):
             else:
                 source = Image.open(source_path)
             with source:
-                art_image = ImageOps.fit(
-                    source.convert("L"),
-                    (size, size),
-                    method=resample,
-                ).convert("1")
+                if mode == ALBUM_ART_MODE_CLASSIC:
+                    art_image = _render_album_art_classic_for_epd(source, size, resample)
+                else:
+                    art_image = _render_album_art_enhanced_for_epd(source, size, resample)
         except Exception:
             art_image = None
 
-    cache[track_path] = art_image
+    cache[cache_key] = art_image
     return art_image
 
 
@@ -1229,6 +1264,37 @@ def _find_folder_art_path(track_path):
         if candidate.exists() and candidate.is_file():
             return candidate
     return None
+
+
+def _normalize_album_art_mode(value: str | None) -> str:
+    mode = str(value or "").strip().lower()
+    if mode == ALBUM_ART_MODE_CLASSIC:
+        return ALBUM_ART_MODE_CLASSIC
+    return ALBUM_ART_MODE_ENHANCED
+
+
+def _render_album_art_classic_for_epd(source: Image.Image, size: int, resample) -> Image.Image:
+    return ImageOps.fit(source.convert("L"), (size, size), method=resample).convert("1")
+
+
+def _render_album_art_enhanced_for_epd(source: Image.Image, size: int, resample) -> Image.Image:
+    # Improve perceived detail before final 1-bit conversion for e-paper.
+    art = ImageOps.fit(source.convert("L"), (size, size), method=resample)
+    art = ImageOps.autocontrast(art, cutoff=ALBUM_ART_AUTOCONTRAST_CUTOFF)
+    art = art.filter(
+        ImageFilter.UnsharpMask(
+            radius=ALBUM_ART_UNSHARP_RADIUS,
+            percent=ALBUM_ART_UNSHARP_PERCENT,
+            threshold=ALBUM_ART_UNSHARP_THRESHOLD,
+        )
+    )
+    art = art.point(lambda value: int(255 * ((value / 255.0) ** ALBUM_ART_GAMMA)))
+
+    if hasattr(Image, "Dither"):
+        dither = Image.Dither.FLOYDSTEINBERG
+    else:
+        dither = Image.FLOYDSTEINBERG
+    return art.convert("1", dither=dither)
 
 
 def draw_progress_bar(draw, x, y, width, height, progress_ratio):
@@ -2409,6 +2475,7 @@ def render_now_playing(
     status,
     charge_anim_frame,
     album_art_cache,
+    album_art_render_mode=DEFAULT_ALBUM_ART_MODE,
     focus_index=1,
     song_scroll_px=0,
 ):
@@ -2455,7 +2522,12 @@ def render_now_playing(
             if state.current_track.parent and state.current_track.parent.parent:
                 artist_name = state.current_track.parent.parent.name
 
-        album_art = load_album_art(state.current_track, NOW_PLAYING_ART_SIZE, album_art_cache)
+        album_art = load_album_art(
+            state.current_track,
+            NOW_PLAYING_ART_SIZE,
+            album_art_cache,
+            render_mode=album_art_render_mode,
+        )
         if album_art is not None:
             image.paste(album_art, (art_left, art_top))
         else:
@@ -2740,6 +2812,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
         settings_actions.bluetooth_adapter_status,
     )
     album_art_cache = {}
+    album_art_render_mode = _normalize_album_art_mode(settings.album_art_mode)
     now_playing_last_progress_bucket = -1
     now_playing_focus_index = 1
     now_playing_song_text = ""
@@ -2885,6 +2958,14 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
             selected_hint=selected_hint,
         )
 
+    def build_settings_album_art_view(selected_hint: int = 0) -> SettingsViewState:
+        return build_settings_view(
+            view_id="settings_album_art",
+            title="Album Art",
+            items=_settings_album_art_items(settings),
+            selected_hint=selected_hint,
+        )
+
     def build_settings_library_view(selected_hint: int = 0) -> SettingsViewState:
         return build_settings_view(
             view_id="settings_library",
@@ -2969,7 +3050,9 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
 
     def set_settings_and_save(new_settings: PersistedSettings):
         nonlocal settings
+        nonlocal album_art_render_mode
         settings = new_settings
+        album_art_render_mode = _normalize_album_art_mode(settings.album_art_mode)
         _safe_save_settings(settings_store, settings)
         refresh_settings_root_if_needed()
 
@@ -3015,7 +3098,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
         if config.show_controls_log and config.interactive:
             logging.info("Music library root: %s", MUSIC_DIR)
             logging.info(
-                "Controls: u/d/s + left/right, b (back), q, p/n/k/r, v+/v-, b+/b-, m, c then Enter"
+                "Controls: u/d/s + left/right, b (back), q, p/n/k/r/t, v+/v-, b+/b-, m, c then Enter"
             )
 
         while True:
@@ -3107,6 +3190,21 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                     now_playing_last_progress_bucket = -1
                     set_selected_label(footer_status_label(library_totals_label, player))
                     should_redraw = True
+                elif current_view == "now_playing" and event == "TOGGLE_ART_MODE":
+                    new_mode = (
+                        ALBUM_ART_MODE_CLASSIC
+                        if album_art_render_mode == ALBUM_ART_MODE_ENHANCED
+                        else ALBUM_ART_MODE_ENHANCED
+                    )
+                    set_settings_and_save(
+                        PersistedSettings(
+                            audio_output_mode=settings.audio_output_mode,
+                            music_import_dir=settings.music_import_dir,
+                            last_connected_bt_address=settings.last_connected_bt_address,
+                            album_art_mode=new_mode,
+                        )
+                    )
+                    should_redraw = True
                 elif current_view in ("settings_root", "settings_list") and event == "UP":
                     view = _current_settings_view(settings_nav_stack)
                     if view.items:
@@ -3131,6 +3229,9 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                                 current_view = _current_settings_view_name(settings_nav_stack)
                             elif action == "open_audio_output":
                                 push_settings_view(build_settings_audio_view())
+                                current_view = _current_settings_view_name(settings_nav_stack)
+                            elif action == "open_album_art":
+                                push_settings_view(build_settings_album_art_view())
                                 current_view = _current_settings_view_name(settings_nav_stack)
                             elif action == "open_library":
                                 push_settings_view(build_settings_library_view())
@@ -3176,6 +3277,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                                             audio_output_mode=settings.audio_output_mode,
                                             music_import_dir=settings.music_import_dir,
                                             last_connected_bt_address=selected_item.address,
+                                            album_art_mode=settings.album_art_mode,
                                         )
                                     )
                                     settings_bt_status = run_settings_action(
@@ -3204,6 +3306,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                                                 audio_output_mode=settings.audio_output_mode,
                                                 music_import_dir=settings.music_import_dir,
                                                 last_connected_bt_address=address,
+                                                album_art_mode=settings.album_art_mode,
                                             )
                                         )
                                 elif action == "bt_disconnect":
@@ -3224,6 +3327,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                                                 audio_output_mode=settings.audio_output_mode,
                                                 music_import_dir=settings.music_import_dir,
                                                 last_connected_bt_address=None,
+                                                album_art_mode=settings.album_art_mode,
                                             )
                                         )
                                 settings_last_result = action_result.message
@@ -3270,6 +3374,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                                             audio_output_mode=mode,
                                             music_import_dir=settings.music_import_dir,
                                             last_connected_bt_address=settings.last_connected_bt_address,
+                                            album_art_mode=settings.album_art_mode,
                                         )
                                     )
                                     settings_last_result = f"Audio mode set to {mode}"
@@ -3278,6 +3383,23 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                                     )
                                     refresh_settings_root_if_needed()
                                     should_redraw = True
+                        elif view.view_id == "settings_album_art":
+                            if action == "set_album_art_mode":
+                                mode = _normalize_album_art_mode(selected_item.value)
+                                set_settings_and_save(
+                                    PersistedSettings(
+                                        audio_output_mode=settings.audio_output_mode,
+                                        music_import_dir=settings.music_import_dir,
+                                        last_connected_bt_address=settings.last_connected_bt_address,
+                                        album_art_mode=mode,
+                                    )
+                                )
+                                settings_last_result = f"Album art mode set to {mode}"
+                                replace_current_settings_view(
+                                    build_settings_album_art_view(selected_hint=view.selected_idx)
+                                )
+                                refresh_settings_root_if_needed()
+                                should_redraw = True
                         elif view.view_id == "settings_library":
                             if action == "rebuild_library":
                                 report = _safe_scan_library(library)
@@ -3395,6 +3517,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                         status,
                         status_plumbing.charge_anim_frame(),
                         album_art_cache,
+                        album_art_render_mode=album_art_render_mode,
                         focus_index=now_playing_focus_index,
                         song_scroll_px=now_playing_song_scroll_px,
                     )

@@ -204,6 +204,7 @@ class SettingsActions:
         rows = (
             ("Audio Backend", backend),
             ("Audio Mode", str(getattr(settings, "audio_output_mode", "auto"))),
+            ("Album Art", str(getattr(settings, "album_art_mode", "enhanced"))),
             ("Music Root", str(self.music_dir)),
             ("Import Folder", str(getattr(settings, "music_import_dir", ""))),
             ("Last BT Device", str(getattr(settings, "last_connected_bt_address", None) or "None")),

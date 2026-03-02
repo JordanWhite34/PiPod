@@ -111,11 +111,12 @@ Controls:
 - `u` / `d` move selection
 - `s` or `right` select
 - `b` or `left` go back
+- `t` toggle album art render mode (Now Playing)
 - `q` quit
 
 Settings persistence:
 - `data/settings.json`
-- Keys: `audio_output_mode`, `music_import_dir`, `last_connected_bt_address`
+- Keys: `audio_output_mode`, `album_art_mode`, `music_import_dir`, `last_connected_bt_address`
 
 ## Simulator And Regression
 Run tests:
