@@ -61,7 +61,9 @@ SETTINGS_ITEM_SCROLL_STEP_PX = 1
 SETTINGS_ITEM_SCROLL_GAP_PX = 24
 NOW_PLAYING_ART_SIZE = 96
 NOW_PLAYING_LEFT_MARGIN = 8
-NOW_PLAYING_ART_TOP = 8
+NOW_PLAYING_CONTEXT_TOP = 4
+NOW_PLAYING_CONTEXT_RIGHT_PADDING = 20
+NOW_PLAYING_ART_TOP = 20
 NOW_PLAYING_PROGRESS_TOP_GAP = 8
 NOW_PLAYING_TIME_TOP_GAP = 11
 NOW_PLAYING_TITLE_TOP_GAP = 13
@@ -264,6 +266,7 @@ class RunStats:
     selected_index: int = 0
     selected_menu_item: str = MENU_ITEMS[0]
     now_playing_label: str = ""
+    now_playing_context_label: str = ""
     library_totals_label: str = ""
 
     @property
@@ -283,6 +286,7 @@ class RunStats:
             "selected_index": self.selected_index,
             "selected_menu_item": self.selected_menu_item,
             "now_playing_label": self.now_playing_label,
+            "now_playing_context_label": self.now_playing_context_label,
             "library_totals_label": self.library_totals_label,
         }
 
@@ -2597,6 +2601,7 @@ def render_now_playing(
     album_art_render_mode=DEFAULT_ALBUM_ART_MODE,
     focus_index=1,
     song_scroll_px=0,
+    context_label="",
 ):
     """Render a mono frame buffer for album art + progress playback view."""
     image = Image.new("1", (epd.width, epd.height), 255)
@@ -2606,6 +2611,10 @@ def render_now_playing(
     left = NOW_PLAYING_LEFT_MARGIN
     max_width = epd.width - (left * 2)
     state = player.state()
+    context_width = max(0, epd.width - left - NOW_PLAYING_CONTEXT_RIGHT_PADDING)
+    context_text = ellipsize_text(str(context_label or "").strip(), hint_font, context_width)
+    if context_text:
+        draw.text((left, NOW_PLAYING_CONTEXT_TOP), context_text, font=hint_font, fill=0)
 
     progress_s, progress_duration_s = player.playback_progress()
     art_left = (epd.width - NOW_PLAYING_ART_SIZE) // 2
@@ -2850,6 +2859,35 @@ def _now_playing_song_artist_text(player, library) -> str:
     return f"{song_name} - {artist_name}"
 
 
+def _infer_now_playing_context_label(player, library) -> str:
+    state = player.state()
+    current = getattr(state, "current_track", None)
+    if current is None:
+        return "Nothing queued"
+
+    metadata = library.track_by_path(current)
+    if metadata is not None:
+        album = str(getattr(metadata, "album", "") or "").strip()
+        if album:
+            return album
+
+    current_path = Path(current)
+    parent = str(getattr(current_path.parent, "name", "") or "").strip()
+    if parent:
+        return parent
+    return "Library"
+
+
+def _music_playback_context_label(view: MusicViewState, item: MusicItem) -> str | None:
+    if item.kind == "playlist_shuffle":
+        return "Shuffle All"
+    if item.kind in {"playlist", "song"}:
+        title = str(view.title or "").strip()
+        if title:
+            return title
+    return None
+
+
 def _play_pause_or_shuffle_all(player, library) -> bool:
     try:
         current = player.current_track_path()
@@ -2934,6 +2972,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
     now_playing_last_progress_bucket = -1
     now_playing_focus_index = 1
     now_playing_song_text = ""
+    now_playing_context_label = ""
     now_playing_song_scroll_px = 0
     now_playing_song_should_scroll = False
     now_playing_song_last_scroll_tick = 0.0
@@ -2990,6 +3029,20 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
             bool(now_playing_song_text)
             and measure_text_width(now_playing_song_text, fonts[1]) > (epd.width - 16)
         )
+
+    def set_now_playing_context_label(value: str | None = None):
+        nonlocal now_playing_context_label
+        text = str(value or "").strip()
+        if text:
+            now_playing_context_label = text
+            return
+        now_playing_context_label = _infer_now_playing_context_label(player, library)
+
+    def player_has_current_track() -> bool:
+        try:
+            return player.current_track_path() is not None
+        except Exception:
+            return False
 
     def set_settings_item_scroll_key(key_value, label_text, label_width):
         nonlocal settings_item_scroll_key
@@ -3189,6 +3242,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
         now_playing_focus_index = 1
         now_playing_last_progress_bucket = -1
         set_now_playing_song_text(_now_playing_song_artist_text(player, library))
+        set_now_playing_context_label()
         footer_selected = False
 
     try:
@@ -3281,8 +3335,11 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                             enter_settings_root()
                             footer_selected = False
                             should_redraw = True
-                        elif handle_menu_action(menu_item, library, player):
-                            should_redraw = True
+                        else:
+                            handled_menu_action = handle_menu_action(menu_item, library, player)
+                            if handled_menu_action and menu_item == "Shuffle All":
+                                set_now_playing_context_label("Shuffle All")
+                            should_redraw = handled_menu_action or should_redraw
                 elif current_view in ("music_root", "music_list") and event == "UP":
                     view = _current_music_view(music_nav_stack)
                     if footer_selected:
@@ -3316,7 +3373,10 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                         view = _current_music_view(music_nav_stack)
                         if view.items:
                             selected_item = view.items[_clamp_index(view.selected_idx, len(view.items))]
+                            queue_context_label = _music_playback_context_label(view, selected_item)
                             handled, next_view = _select_music_item(view, selected_item, player, library)
+                            if handled and next_view is None and queue_context_label:
+                                set_now_playing_context_label(queue_context_label)
                             should_redraw = handled or should_redraw
                             if next_view is not None:
                                 music_nav_stack.append(next_view)
@@ -3334,7 +3394,11 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                     if focused == "PREV":
                         should_redraw = player.previous_track() or should_redraw
                     elif focused == "PLAY_PAUSE":
-                        should_redraw = _play_pause_or_shuffle_all(player, library) or should_redraw
+                        had_current_track = player_has_current_track()
+                        play_pause_result = _play_pause_or_shuffle_all(player, library)
+                        if play_pause_result and not had_current_track:
+                            set_now_playing_context_label("Shuffle All")
+                        should_redraw = play_pause_result or should_redraw
                     elif focused == "NEXT":
                         should_redraw = player.next_track() or should_redraw
                     elif focused == "SHUFFLE":
@@ -3588,7 +3652,11 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                         set_selected_label(footer_status_label(library_totals_label, player))
                     should_redraw = True
                 elif event == "PLAY_PAUSE":
-                    should_redraw = _play_pause_or_shuffle_all(player, library) or should_redraw
+                    had_current_track = player_has_current_track()
+                    play_pause_result = _play_pause_or_shuffle_all(player, library)
+                    if play_pause_result and not had_current_track:
+                        set_now_playing_context_label("Shuffle All")
+                    should_redraw = play_pause_result or should_redraw
                 elif event == "NEXT_TRACK":
                     should_redraw = player.next_track() or should_redraw
                 elif event == "PREV_TRACK":
@@ -3677,6 +3745,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                         album_art_render_mode=album_art_render_mode,
                         focus_index=now_playing_focus_index,
                         song_scroll_px=now_playing_song_scroll_px,
+                        context_label=now_playing_context_label,
                     )
                 elif current_view in ("music_root", "music_list"):
                     image = render_music_browser(
@@ -3719,6 +3788,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
         stats.selected_index = selected_idx
         stats.selected_menu_item = MENU_ITEMS[selected_idx]
         stats.now_playing_label = _safe_now_playing_label(player)
+        stats.now_playing_context_label = now_playing_context_label
         stats.library_totals_label = library_totals_label
         return stats.to_dict()
 
@@ -3728,6 +3798,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
         stats.selected_index = selected_idx
         stats.selected_menu_item = MENU_ITEMS[selected_idx]
         stats.now_playing_label = _safe_now_playing_label(player)
+        stats.now_playing_context_label = now_playing_context_label
         return stats.to_dict()
     except Exception as exc:
         stats.status = "error"
@@ -3736,6 +3807,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
         stats.selected_index = selected_idx
         stats.selected_menu_item = MENU_ITEMS[selected_idx]
         stats.now_playing_label = _safe_now_playing_label(player)
+        stats.now_playing_context_label = now_playing_context_label
         if config.raise_exceptions:
             raise
         return stats.to_dict()

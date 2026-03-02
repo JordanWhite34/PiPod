@@ -114,6 +114,14 @@ Controls:
 - `t` toggle album art render mode (Now Playing)
 - `q` quit
 
+Bluetooth scan and pairing (Pi Zero 2 W):
+- Menu path: `Settings > Bluetooth > Scan & Pair Headphones`
+- PiPod runs a real BlueZ scan session via `bluetoothctl` (not simulator fixtures)
+- Before each scan, PiPod prepares adapter state with: `power on`, `agent on`, `default-agent`, `pairable on`
+- Scan results show nearby discoveries from the active scan window plus paired devices not currently nearby
+- If scanning times out or fails, PiPod returns a safe fallback list of paired devices
+- Requirement: `bluetoothctl` must be installed and the Bluetooth service running on the Pi
+
 Settings persistence:
 - `data/settings.json`
 - Keys: `audio_output_mode`, `album_art_mode`, `music_import_dir`, `last_connected_bt_address`

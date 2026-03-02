@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import time
 from typing import Iterable
 
 try:
@@ -28,6 +29,12 @@ except Exception:
 SUPPORTED_SYNC_EXTENSIONS = {str(ext).lower() for ext in LIBRARY_AUDIO_EXTENSIONS}
 
 _DEVICE_LINE = re.compile(r"^Device\s+([0-9A-F:]{17})\s+(.+)$", flags=re.IGNORECASE)
+_SCAN_NEW_LINE = re.compile(r"^\[NEW\]\s+Device\s+([0-9A-F:]{17})(?:\s+(.+))?$", flags=re.IGNORECASE)
+_SCAN_CHANGED_NAME_LINE = re.compile(
+    r"^\[CHG\]\s+Device\s+([0-9A-F:]{17})\s+(?:Name|Alias):\s+(.+)$",
+    flags=re.IGNORECASE,
+)
+_ANSI_ESCAPE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
 
 @dataclass(frozen=True)
@@ -78,22 +85,60 @@ class SettingsActions:
 
         scan_timeout = max(1, int(duration_s or self.scan_seconds))
         try:
-            subprocess.run(
-                ["bluetoothctl", "--timeout", str(scan_timeout), "scan", "on"],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=scan_timeout + 3,
+            prep_commands = (
+                ["power", "on"],
+                ["agent", "on"],
+                ["default-agent"],
+                ["pairable", "on"],
             )
-        except Exception:
-            # Best-effort; we'll still read known devices below.
-            pass
+            for command in prep_commands:
+                prep_output = self._run_bt(command)
+                if prep_output is None:
+                    return SettingsActionResult(ok=False, message="Bluetooth unavailable")
+                if self._output_indicates_failure(prep_output):
+                    fallback_devices = self._devices_with_state(
+                        self._list_devices(command="paired-devices"),
+                        paired=True,
+                    )
+                    return SettingsActionResult(
+                        ok=False,
+                        message=f"Bluetooth adapter setup failed ({' '.join(command)})",
+                        details={"devices": fallback_devices, "output": prep_output},
+                    )
 
-        devices = self._devices_with_state(self._list_devices(command="devices"))
+            scan_output = self._run_bt_interactive_scan(scan_timeout)
+            if scan_output is None:
+                return SettingsActionResult(ok=False, message="Bluetooth unavailable")
+        except TimeoutError:
+            fallback_devices = self._devices_with_state(self._list_devices(command="paired-devices"), paired=True)
+            return SettingsActionResult(
+                ok=False,
+                message="Bluetooth scan timed out",
+                details={"devices": fallback_devices},
+            )
+        except Exception as exc:
+            logging.warning("Bluetooth scan failed: %s", exc)
+            fallback_devices = self._devices_with_state(self._list_devices(command="paired-devices"), paired=True)
+            return SettingsActionResult(
+                ok=False,
+                message="Bluetooth scan failed",
+                details={"devices": fallback_devices},
+            )
+
+        discovered_devices = self._parse_scan_discoveries(scan_output)
+        paired_devices = self._list_devices(command="paired-devices")
+        merged_devices = self._merge_devices(discovered_devices, paired_devices)
+        devices = self._devices_with_state(merged_devices)
+        nearby_count = len({address for address, _ in discovered_devices})
+        paired_count = len({address for address, _ in paired_devices})
         return SettingsActionResult(
             ok=True,
-            message=f"Found {len(devices)} device(s)",
-            details={"devices": devices},
+            message=f"Found {nearby_count} nearby device(s), {paired_count} paired total",
+            details={
+                "devices": devices,
+                "nearby_count": nearby_count,
+                "paired_count": paired_count,
+            },
         )
 
     def bluetooth_paired_devices(self) -> SettingsActionResult:
@@ -246,6 +291,116 @@ class SettingsActions:
         result.sort(key=lambda device: (device.name.casefold(), device.address))
         return result
 
+    def _run_bt_interactive_scan(self, scan_timeout: int) -> str | None:
+        try:
+            proc = subprocess.Popen(
+                ["bluetoothctl"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        except FileNotFoundError:
+            return None
+
+        try:
+            if proc.stdin is None:
+                raise RuntimeError("bluetoothctl stdin unavailable")
+            proc.stdin.write("scan on\n")
+            proc.stdin.flush()
+            time.sleep(scan_timeout)
+            for command in ("scan off", "devices", "paired-devices", "quit"):
+                proc.stdin.write(f"{command}\n")
+            proc.stdin.flush()
+            output, _ = proc.communicate(timeout=scan_timeout + 10)
+            return str(output or "").strip()
+        except subprocess.TimeoutExpired as exc:
+            if proc.poll() is None:
+                proc.kill()
+            try:
+                remaining, _ = proc.communicate(timeout=2)
+            except Exception:
+                remaining = ""
+            partial = f"{str(exc.stdout or '').strip()}\n{str(remaining or '').strip()}".strip()
+            raise TimeoutError(partial) from exc
+        except Exception:
+            if proc.poll() is None:
+                proc.kill()
+            try:
+                proc.communicate(timeout=2)
+            except Exception:
+                pass
+            raise
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+
+    @staticmethod
+    def _parse_scan_discoveries(output: str) -> list[tuple[str, str]]:
+        devices: dict[str, str] = {}
+        order: list[str] = []
+        for raw_line in str(output or "").splitlines():
+            line = _ANSI_ESCAPE.sub("", raw_line).strip()
+            if not line:
+                continue
+
+            changed_name_match = _SCAN_CHANGED_NAME_LINE.match(line)
+            if changed_name_match is not None:
+                address = changed_name_match.group(1).upper()
+                name = changed_name_match.group(2).strip() or address
+                if address not in devices:
+                    order.append(address)
+                devices[address] = name
+                continue
+
+            new_match = _SCAN_NEW_LINE.match(line)
+            if new_match is None:
+                continue
+            address = new_match.group(1).upper()
+            name = (new_match.group(2) or "").strip() or address
+            if address not in devices:
+                order.append(address)
+                devices[address] = name
+                continue
+            if devices[address] == address and name != address:
+                devices[address] = name
+
+        return [(address, devices[address]) for address in order]
+
+    @staticmethod
+    def _merge_devices(
+        primary: Iterable[tuple[str, str]],
+        secondary: Iterable[tuple[str, str]],
+    ) -> list[tuple[str, str]]:
+        merged: dict[str, str] = {}
+        order: list[str] = []
+
+        def add(entries: Iterable[tuple[str, str]], *, prefer_existing: bool):
+            for address, name in entries:
+                normalized_address = str(address).strip().upper()
+                if not normalized_address:
+                    continue
+                normalized_name = str(name or "").strip() or normalized_address
+                existing = merged.get(normalized_address)
+                if existing is None:
+                    merged[normalized_address] = normalized_name
+                    order.append(normalized_address)
+                    continue
+                if prefer_existing:
+                    if existing == normalized_address and normalized_name != normalized_address:
+                        merged[normalized_address] = normalized_name
+                    continue
+                if existing == normalized_address and normalized_name != normalized_address:
+                    merged[normalized_address] = normalized_name
+
+        add(primary, prefer_existing=True)
+        add(secondary, prefer_existing=False)
+        return [(address, merged[address]) for address in order]
+
     @staticmethod
     def _parse_bt_flag(output: str, key: str) -> bool:
         for line in output.splitlines():
@@ -307,3 +462,18 @@ class SettingsActions:
             "changing",
         )
         return any(marker in lowered for marker in success_markers)
+
+    @staticmethod
+    def _output_indicates_failure(output: str) -> bool:
+        lowered = str(output or "").strip().lower()
+        if not lowered:
+            return True
+        failure_markers = (
+            "not available",
+            "failed",
+            "error",
+            "no default controller available",
+            "not ready",
+            "not powered",
+        )
+        return any(marker in lowered for marker in failure_markers)

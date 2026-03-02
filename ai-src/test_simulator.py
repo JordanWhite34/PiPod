@@ -41,7 +41,7 @@ from pipod_runtime import (
     render_now_playing,
     run_pipod_loop,
 )
-from settings_actions import SettingsActionResult, SettingsActions
+from settings_actions import BluetoothDevice, SettingsActionResult, SettingsActions
 from settings_store import PersistedSettings, SettingsStore
 from input_provider import CombinedEventProvider, GpioFiveWayConfig, GpioFiveWayInput
 from simulator_adapters import FakeEPD, FakeSettingsActions, FixtureLibrary, MockPlayer
@@ -528,6 +528,7 @@ class MusicBrowserTests(unittest.TestCase):
             str(player.current_track_path()),
             "/sim/Nina Simone/Anthology/07 Sinnerman (Live at the Village Gate - Extra Long Deliberately Verbose Test Title Version).mp3",
         )
+        self.assertEqual(stats["now_playing_context_label"], "Anthology - Nina Simone")
 
     def test_songs_path_starts_contextual_queue(self):
         stats, player = self._run_scripted(
@@ -580,6 +581,7 @@ class MusicBrowserTests(unittest.TestCase):
         )
         self.assertEqual(stats["final_view"], "music_list")
         self.assertIsNotNone(player.current_track_path())
+        self.assertEqual(stats["now_playing_context_label"], "All Songs")
 
     def test_all_songs_playlist_song_selection_starts_selected_song(self):
         fixture_library = FixtureLibrary(FIXTURE_PATH, seed=1337)
@@ -837,6 +839,123 @@ class SettingsActionsTests(unittest.TestCase):
             result = actions.sync_music_from_import(root / "missing")
             self.assertFalse(result.ok)
             self.assertIn("Import folder missing", result.message)
+
+    def test_bluetooth_scan_returns_unavailable_when_bluetoothctl_missing(self):
+        actions = SettingsActions(music_dir=Path("/tmp/music"))
+        with mock.patch("settings_actions.shutil.which", return_value=None):
+            result = actions.bluetooth_scan()
+        self.assertFalse(result.ok)
+        self.assertIn("bluetoothctl missing", result.message.lower())
+
+    def test_parse_scan_discoveries_tracks_name_updates(self):
+        output = "\n".join(
+            [
+                "[NEW] Device AA:BB:CC:DD:EE:01 Unknown Device",
+                "[CHG] Device AA:BB:CC:DD:EE:01 Name: Pixel Buds Pro",
+                "[CHG] Device AA:BB:CC:DD:EE:02 Alias: Desk Speaker",
+                "[CHG] Device AA:BB:CC:DD:EE:03 RSSI: -67",
+                "Device AA:BB:CC:DD:EE:04 Not Nearby List Entry",
+            ]
+        )
+        parsed = SettingsActions._parse_scan_discoveries(output)
+        self.assertEqual(
+            parsed,
+            [
+                ("AA:BB:CC:DD:EE:01", "Pixel Buds Pro"),
+                ("AA:BB:CC:DD:EE:02", "Desk Speaker"),
+            ],
+        )
+
+    def test_merge_devices_prefers_discovered_names_and_fills_placeholders(self):
+        merged = SettingsActions._merge_devices(
+            primary=[
+                ("AA:BB:CC:DD:EE:01", "Scan Name"),
+                ("AA:BB:CC:DD:EE:02", "AA:BB:CC:DD:EE:02"),
+            ],
+            secondary=[
+                ("AA:BB:CC:DD:EE:01", "Paired Name"),
+                ("AA:BB:CC:DD:EE:02", "Paired Better Name"),
+                ("AA:BB:CC:DD:EE:03", "Paired Only"),
+            ],
+        )
+        self.assertEqual(
+            merged,
+            [
+                ("AA:BB:CC:DD:EE:01", "Scan Name"),
+                ("AA:BB:CC:DD:EE:02", "Paired Better Name"),
+                ("AA:BB:CC:DD:EE:03", "Paired Only"),
+            ],
+        )
+
+    def test_bluetooth_scan_prepares_adapter_and_merges_discovered_and_paired(self):
+        actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
+        scan_output = "\n".join(
+            [
+                "[NEW] Device AA:BB:CC:DD:EE:11 Nearby Device",
+                "[CHG] Device AA:BB:CC:DD:EE:11 Name: Nearby Renamed",
+            ]
+        )
+
+        with (
+            mock.patch("settings_actions.shutil.which", return_value="/usr/bin/bluetoothctl"),
+            mock.patch.object(actions, "_run_bt", return_value="ok") as run_bt,
+            mock.patch.object(actions, "_run_bt_interactive_scan", return_value=scan_output) as run_scan,
+            mock.patch.object(
+                actions,
+                "_list_devices",
+                return_value=[
+                    ("AA:BB:CC:DD:EE:11", "Paired Name"),
+                    ("AA:BB:CC:DD:EE:22", "Paired Only"),
+                ],
+            ) as list_devices,
+            mock.patch.object(actions, "_devices_with_state", return_value=[]) as with_state,
+        ):
+            result = actions.bluetooth_scan(duration_s=4)
+
+        run_bt.assert_has_calls(
+            [
+                mock.call(["power", "on"]),
+                mock.call(["agent", "on"]),
+                mock.call(["default-agent"]),
+                mock.call(["pairable", "on"]),
+            ],
+            any_order=False,
+        )
+        run_scan.assert_called_once_with(4)
+        list_devices.assert_called_once_with(command="paired-devices")
+        with_state.assert_called_once_with(
+            [
+                ("AA:BB:CC:DD:EE:11", "Nearby Renamed"),
+                ("AA:BB:CC:DD:EE:22", "Paired Only"),
+            ]
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.message, "Found 1 nearby device(s), 2 paired total")
+
+    def test_bluetooth_scan_timeout_returns_error_with_paired_fallback(self):
+        actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
+        fallback_devices = [
+            BluetoothDevice(
+                address="AA:BB:CC:DD:EE:33",
+                name="Fallback Paired",
+                paired=True,
+                connected=False,
+                trusted=True,
+            )
+        ]
+
+        with (
+            mock.patch("settings_actions.shutil.which", return_value="/usr/bin/bluetoothctl"),
+            mock.patch.object(actions, "_run_bt", return_value="ok"),
+            mock.patch.object(actions, "_run_bt_interactive_scan", side_effect=TimeoutError("scan timeout")),
+            mock.patch.object(actions, "_list_devices", return_value=[("AA:BB:CC:DD:EE:33", "Fallback Paired")]),
+            mock.patch.object(actions, "_devices_with_state", return_value=fallback_devices),
+        ):
+            result = actions.bluetooth_scan(duration_s=3)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.message, "Bluetooth scan timed out")
+        self.assertEqual(result.details["devices"], fallback_devices)
 
 
 class RuntimeSettingsFlowTests(unittest.TestCase):
