@@ -38,6 +38,8 @@ from pipod_runtime import (
     _volume_slider_knob_x,
     _next_now_playing_idle_art_name,
     _persist_now_playing_idle_art_image,
+    _infer_now_playing_idle_art_name_from_persisted_image,
+    _resolve_now_playing_idle_art_selection_name,
     _resolve_now_playing_idle_art_path,
     build_music_index,
     load_now_playing_idle_art,
@@ -231,6 +233,82 @@ class SimulatorAdapterTests(unittest.TestCase):
             ("PREV", "PLAY_PAUSE", "NEXT", "SHUFFLE", "LOOP"),
         )
 
+    def test_now_playing_progress_ring_replaces_progress_bar(self):
+        library = FixtureLibrary(FIXTURE_PATH, seed=1337)
+        player = MockPlayer(seed=1337)
+        tracks = [track.path for track in library.random_tracks()]
+        player.set_track_durations(library.duration_map())
+        player.set_queue(tracks, autoplay=True)
+        player.advance_time(30.0)
+
+        epd = FakeEPD(write_frames=False)
+        status = StatusPlumbing().read()
+        fonts = load_fonts()
+
+        bar_image = render_now_playing(
+            epd=epd,
+            fonts=fonts,
+            player=player,
+            library=library,
+            status=status,
+            charge_anim_frame=0,
+            album_art_cache={},
+            focus_index=1,
+            song_scroll_px=0,
+            progress_ring_enabled=False,
+        )
+        ring_image = render_now_playing(
+            epd=epd,
+            fonts=fonts,
+            player=player,
+            library=library,
+            status=status,
+            charge_anim_frame=0,
+            album_art_cache={},
+            focus_index=1,
+            song_scroll_px=0,
+            progress_ring_enabled=True,
+        )
+
+        bar_pixels = bar_image.load()
+        ring_pixels = ring_image.load()
+
+        def border_black_pixels(pixels, border=3):
+            count = 0
+            for y in range(epd.height):
+                for x in range(epd.width):
+                    if x < border or x >= epd.width - border or y < border or y >= epd.height - border:
+                        if pixels[x, y] == 0:
+                            count += 1
+            return count
+
+        art_bottom = NOW_PLAYING_ART_TOP + NOW_PLAYING_ART_SIZE - 1
+        progress_y = art_bottom + NOW_PLAYING_PROGRESS_TOP_GAP
+        progress_h = 8
+        progress_x = NOW_PLAYING_LEFT_MARGIN
+        progress_w = epd.width - (NOW_PLAYING_LEFT_MARGIN * 2)
+
+        def progress_bar_black_pixels(pixels):
+            count = 0
+            for y in range(progress_y, progress_y + progress_h):
+                for x in range(progress_x, progress_x + progress_w):
+                    if 0 <= x < epd.width and 0 <= y < epd.height and pixels[x, y] == 0:
+                        count += 1
+            return count
+
+        corner_points = (
+            (1, 1),
+            (epd.width - 2, 1),
+            (1, epd.height - 2),
+            (epd.width - 2, epd.height - 2),
+        )
+        for point_x, point_y in corner_points:
+            self.assertEqual(bar_pixels[point_x, point_y], 255)
+            self.assertEqual(ring_pixels[point_x, point_y], 0)
+
+        self.assertGreater(border_black_pixels(ring_pixels), border_black_pixels(bar_pixels) + 120)
+        self.assertGreater(progress_bar_black_pixels(bar_pixels), progress_bar_black_pixels(ring_pixels) + 60)
+
     def test_resolve_now_playing_idle_art_path_uses_selected_when_available(self):
         first = Path("/tmp/first.png")
         second = Path("/tmp/second.png")
@@ -254,18 +332,31 @@ class SimulatorAdapterTests(unittest.TestCase):
             self.assertEqual(_next_now_playing_idle_art_name("third.png"), "first.png")
             self.assertEqual(_next_now_playing_idle_art_name(None), "first.png")
 
+    def test_resolve_idle_art_selection_name_uses_persisted_metadata_fallback(self):
+        first = Path("/tmp/first.png")
+        second = Path("/tmp/second.png")
+        with (
+            mock.patch("pipod_runtime._list_now_playing_idle_art_paths", return_value=(first, second)),
+            mock.patch("pipod_runtime._read_persisted_now_playing_idle_art_name", return_value="second.png"),
+        ):
+            selected = _resolve_now_playing_idle_art_selection_name(None)
+        self.assertEqual(selected, "second.png")
+
     def test_persist_now_playing_idle_art_image_writes_png(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             source = root / "source.jpg"
             target = root / "persisted_idle_cover.png"
+            selection_target = root / "persisted_idle_cover_selection.txt"
             Image.new("RGB", (8, 8), "red").save(source, format="JPEG")
             with (
                 mock.patch("pipod_runtime._resolve_now_playing_idle_art_path", return_value=source),
                 mock.patch("pipod_runtime.NOW_PLAYING_IDLE_ART_PERSIST_PATH", target),
+                mock.patch("pipod_runtime.NOW_PLAYING_IDLE_ART_SELECTION_PATH", selection_target),
             ):
                 self.assertTrue(_persist_now_playing_idle_art_image("source.jpg"))
             self.assertTrue(target.exists())
+            self.assertEqual(selection_target.read_text(encoding="utf-8"), "source.jpg")
             with Image.open(target) as persisted:
                 self.assertEqual(persisted.format, "PNG")
 
@@ -297,6 +388,22 @@ class SimulatorAdapterTests(unittest.TestCase):
             self.assertIsNotNone(art)
             self.assertEqual(art.size, (16, 16))
             self.assertEqual(art.getpixel((0, 0)), 0)
+
+    def test_infer_idle_art_name_from_persisted_image_matches_asset(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = root / "first.png"
+            second = root / "second.png"
+            persisted = root / "persisted_idle_cover.png"
+            Image.new("RGB", (10, 10), "white").save(first, format="PNG")
+            Image.new("RGB", (10, 10), "black").save(second, format="PNG")
+            Image.new("RGB", (10, 10), "black").save(persisted, format="PNG")
+            with (
+                mock.patch("pipod_runtime.NOW_PLAYING_IDLE_ART_PERSIST_PATH", persisted),
+                mock.patch("pipod_runtime._list_now_playing_idle_art_paths", return_value=(first, second)),
+            ):
+                selected = _infer_now_playing_idle_art_name_from_persisted_image()
+            self.assertEqual(selected, "second.png")
 
 
 class SettingsRenderTests(unittest.TestCase):
@@ -568,7 +675,7 @@ class MusicBrowserTests(unittest.TestCase):
         )
         playlists_root = root_items[0]
         playlist_labels = [item.label for item in playlists_root.child_items]
-        self.assertEqual(playlist_labels[:3], ["All Songs", "Road Trip", "Shuffle All"])
+        self.assertEqual(playlist_labels, ["All Songs", "Road Trip"])
         self.assertEqual(playlists_root.child_items[1].track_paths, custom_playlist_paths)
 
     def _run_scripted(self, events: list[str]) -> tuple[dict, MockPlayer]:
@@ -677,19 +784,66 @@ class MusicBrowserTests(unittest.TestCase):
             "/sim/Fleetwood Mac/Rumours/02 Never Going Back Again.mp3",
         )
 
-    def test_playlists_shuffle_all_stays_in_music_view(self):
-        stats, player = self._run_scripted(
-            [
-                "SELECT",  # Music root
-                "SELECT",  # Playlists
-                "DOWN",  # Shuffle All
-                "SELECT",
-                "QUIT",
-            ]
-        )
+    def test_end_of_non_looping_list_falls_back_to_all_songs(self):
+        library = FixtureLibrary(FIXTURE_PATH, seed=1337)
+        player = MockPlayer(seed=1337)
+        short_durations = {track.path: 1 for track in library.all_tracks()}
+        player.set_track_durations(short_durations)
+        player.toggle_loop()  # default is on; switch off for this behavior
+        expected_all_songs_first = library.all_tracks()[0].path
+
+        epd = FakeEPD(write_frames=False)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_store = SettingsStore(Path(temp_dir) / "settings.json")
+            dependencies = RuntimeDependencies(
+                display=epd,
+                library=library,
+                player=player,
+                event_provider=ScriptedEventProvider(
+                    [
+                        "SELECT",  # Music root
+                        "DOWN",
+                        "DOWN",  # Albums
+                        "SELECT",
+                        "SELECT",  # first album (single-track anthology)
+                        "SELECT",  # first song
+                        "WAIT",  # allow poll() to reach queue end and trigger fallback
+                        "QUIT",
+                    ]
+                ),
+                fonts=load_fonts(),
+                status_plumbing=StatusPlumbing(),
+                settings_store=settings_store,
+                settings_actions=FakeSettingsActions(music_dir=Path("/sim/music")),
+            )
+            config = RunConfig(
+                timeout_s=0.0,
+                max_steps=50,
+                interactive=False,
+                show_controls_log=False,
+                initialize_display=False,
+                clear_display_on_start=False,
+                loop_step_s=1.0,
+                raise_exceptions=True,
+            )
+
+            try:
+                stats = run_pipod_loop(config, dependencies)
+            finally:
+                library.close()
+                player.shutdown()
+                epd.sleep()
+
         self.assertEqual(stats["final_view"], "music_list")
-        self.assertIsNotNone(player.current_track_path())
-        self.assertTrue(player.state().is_shuffle)
+        self.assertEqual(stats["now_playing_context_label"], "All Songs")
+        self.assertEqual(player.current_track_path(), expected_all_songs_first)
+
+    def test_playlists_view_excludes_shuffle_all_entry(self):
+        fixture_library = FixtureLibrary(FIXTURE_PATH, seed=1337)
+        tracks = fixture_library.all_tracks()
+        fixture_library.close()
+        playlist_labels = [item.label for item in build_music_index(tracks)[0].child_items]
+        self.assertNotIn("Shuffle All", playlist_labels)
 
     def test_all_songs_playlist_play_all_starts_playback(self):
         stats, player = self._run_scripted(
@@ -725,6 +879,24 @@ class MusicBrowserTests(unittest.TestCase):
         )
         self.assertEqual(stats["final_view"], "music_list")
         self.assertEqual(player.current_track_path(), expected_path)
+
+    def test_now_playing_preserves_playlist_context_label(self):
+        stats, _ = self._run_scripted(
+            [
+                "SELECT",  # Music root
+                "SELECT",  # Playlists
+                "SELECT",  # All Songs playlist entry
+                "SELECT",  # Play All
+                "BACK",  # Playlists
+                "BACK",  # Music root
+                "BACK",  # Menu
+                "DOWN",  # Now Playing
+                "SELECT",  # enter now playing
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "now_playing")
+        self.assertEqual(stats["now_playing_context_label"], "All Songs")
 
     def test_back_navigation_returns_to_menu(self):
         stats, _ = self._run_scripted(
@@ -781,6 +953,21 @@ class MusicBrowserTests(unittest.TestCase):
         self.assertEqual(stats["final_view"], "now_playing")
         self.assertIsNotNone(player.current_track_path())
         self.assertFalse(player.state().is_shuffle)
+        self.assertEqual(stats["now_playing_context_label"], "All Songs")
+
+    def test_menu_shuffle_all_sets_all_songs_context(self):
+        stats, player = self._run_scripted(
+            [
+                "DOWN",  # Now Playing
+                "DOWN",  # Shuffle All
+                "SELECT",
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "menu")
+        self.assertIsNotNone(player.current_track_path())
+        self.assertTrue(player.state().is_shuffle)
+        self.assertEqual(stats["now_playing_context_label"], "All Songs")
 
     def test_menu_footer_select_enters_now_playing(self):
         stats, _ = self._run_scripted(
@@ -832,6 +1019,7 @@ class MusicBrowserTests(unittest.TestCase):
         self.assertEqual(stats["final_view"], "menu")
         self.assertIsNotNone(player.current_track_path())
         self.assertFalse(player.state().is_shuffle)
+        self.assertEqual(stats["now_playing_context_label"], "All Songs")
 
     def test_menu_settings_enters_settings_root(self):
         stats, _ = self._run_scripted(
@@ -906,6 +1094,15 @@ class SettingsStoreTests(unittest.TestCase):
             store.save(expected)
             actual = store.load()
             self.assertEqual(actual.now_playing_idle_art, "raccoon.png")
+
+    def test_settings_store_round_trip_with_now_playing_progress_ring(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            store = SettingsStore(settings_path)
+            expected = PersistedSettings(now_playing_progress_ring=True)
+            store.save(expected)
+            actual = store.load()
+            self.assertTrue(actual.now_playing_progress_ring)
 
     def test_settings_store_migrates_legacy_speaker_mode_to_aux(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1213,6 +1410,7 @@ class RuntimeSettingsFlowTests(unittest.TestCase):
                     "DOWN",
                     "DOWN",
                     "DOWN",  # Idle Cover
+                    "DOWN",  # skip Full-Screen Progress Border
                     "SELECT",
                     "QUIT",
                 ]
@@ -1220,6 +1418,97 @@ class RuntimeSettingsFlowTests(unittest.TestCase):
         _, persisted = state
         self.assertEqual(stats["final_view"], "settings_list")
         self.assertEqual(persisted.now_playing_idle_art, "first.png")
+
+    def test_startup_recovers_idle_cover_selection_from_persisted_metadata(self):
+        first = Path("/tmp/first.png")
+        second = Path("/tmp/second.png")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            metadata_path = Path(temp_dir) / "persisted_idle_cover_selection.txt"
+            settings_store = SettingsStore(settings_path)
+            settings_store.save(PersistedSettings(now_playing_idle_art=None))
+            metadata_path.write_text("second.png", encoding="utf-8")
+
+            dependencies = RuntimeDependencies(
+                display=FakeEPD(write_frames=False),
+                library=FixtureLibrary(FIXTURE_PATH, seed=1337),
+                player=MockPlayer(seed=1337),
+                event_provider=ScriptedEventProvider(["QUIT"]),
+                fonts=load_fonts(),
+                status_plumbing=StatusPlumbing(),
+                settings_store=settings_store,
+                settings_actions=FakeSettingsActions(music_dir=Path("/sim/music")),
+            )
+            config = RunConfig(
+                timeout_s=0.0,
+                max_steps=10,
+                interactive=False,
+                show_controls_log=False,
+                initialize_display=False,
+                clear_display_on_start=False,
+                loop_step_s=0.5,
+                raise_exceptions=True,
+            )
+            try:
+                with (
+                    mock.patch("pipod_runtime.NOW_PLAYING_IDLE_ART_SELECTION_PATH", metadata_path),
+                    mock.patch("pipod_runtime._list_now_playing_idle_art_paths", return_value=(first, second)),
+                ):
+                    run_pipod_loop(config, dependencies)
+            finally:
+                dependencies.library.close()
+                dependencies.player.shutdown()
+                dependencies.display.sleep()
+
+            persisted = SettingsStore(settings_path).load()
+            self.assertEqual(persisted.now_playing_idle_art, "second.png")
+
+    def test_startup_recovers_idle_cover_selection_from_persisted_image(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            settings_path = Path(temp_dir) / "settings.json"
+            persisted_cover_path = Path(temp_dir) / "persisted_idle_cover.png"
+            first = root / "first.png"
+            second = root / "second.png"
+            Image.new("RGB", (10, 10), "black").save(first, format="PNG")
+            Image.new("RGB", (10, 10), "white").save(second, format="PNG")
+            Image.new("RGB", (10, 10), "white").save(persisted_cover_path, format="PNG")
+            settings_store = SettingsStore(settings_path)
+            settings_store.save(PersistedSettings(now_playing_idle_art=None))
+
+            dependencies = RuntimeDependencies(
+                display=FakeEPD(write_frames=False),
+                library=FixtureLibrary(FIXTURE_PATH, seed=1337),
+                player=MockPlayer(seed=1337),
+                event_provider=ScriptedEventProvider(["QUIT"]),
+                fonts=load_fonts(),
+                status_plumbing=StatusPlumbing(),
+                settings_store=settings_store,
+                settings_actions=FakeSettingsActions(music_dir=Path("/sim/music")),
+            )
+            config = RunConfig(
+                timeout_s=0.0,
+                max_steps=10,
+                interactive=False,
+                show_controls_log=False,
+                initialize_display=False,
+                clear_display_on_start=False,
+                loop_step_s=0.5,
+                raise_exceptions=True,
+            )
+            try:
+                with (
+                    mock.patch("pipod_runtime.NOW_PLAYING_IDLE_ART_PERSIST_PATH", persisted_cover_path),
+                    mock.patch("pipod_runtime._list_now_playing_idle_art_paths", return_value=(first, second)),
+                ):
+                    run_pipod_loop(config, dependencies)
+            finally:
+                dependencies.library.close()
+                dependencies.player.shutdown()
+                dependencies.display.sleep()
+
+            persisted = SettingsStore(settings_path).load()
+            self.assertEqual(persisted.now_playing_idle_art, "second.png")
 
     def test_unavailable_bluetooth_actions_do_not_crash(self):
         class UnavailableSettingsActions(FakeSettingsActions):

@@ -21,6 +21,7 @@ class PersistedSettings:
     last_connected_bt_address: str | None = None
     album_art_mode: str = "enhanced"
     now_playing_idle_art: str | None = None
+    now_playing_progress_ring: bool = False
 
     @classmethod
     def from_raw(cls, raw: dict | None) -> "PersistedSettings":
@@ -52,12 +53,25 @@ class PersistedSettings:
             if not now_playing_idle_art:
                 now_playing_idle_art = None
 
+        now_playing_progress_ring_raw = raw.get("now_playing_progress_ring", False)
+        if isinstance(now_playing_progress_ring_raw, str):
+            now_playing_progress_ring = now_playing_progress_ring_raw.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+                "enabled",
+            }
+        else:
+            now_playing_progress_ring = bool(now_playing_progress_ring_raw)
+
         return cls(
             audio_output_mode=mode,
             music_import_dir=import_dir,
             last_connected_bt_address=last_bt,
             album_art_mode=album_art_mode,
             now_playing_idle_art=now_playing_idle_art,
+            now_playing_progress_ring=now_playing_progress_ring,
         )
 
 

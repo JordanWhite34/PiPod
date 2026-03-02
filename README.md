@@ -124,7 +124,7 @@ Bluetooth scan and pairing (Pi Zero 2 W):
 
 Settings persistence:
 - `data/settings.json`
-- Keys: `audio_output_mode`, `album_art_mode`, `music_import_dir`, `last_connected_bt_address`
+- Keys: `audio_output_mode`, `album_art_mode`, `now_playing_progress_ring`, `music_import_dir`, `last_connected_bt_address`
 
 ## Simulator And Regression
 Run tests:
