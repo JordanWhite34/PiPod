@@ -741,7 +741,7 @@ class SettingsStoreTests(unittest.TestCase):
                 audio_output_mode="bluetooth",
                 music_import_dir="/tmp/import",
                 last_connected_bt_address="AA:BB:CC:DD:EE:FF",
-                album_art_mode="classic",
+                album_art_mode="enhanced_plus",
             )
             store.save(expected)
             actual = store.load()
@@ -909,6 +909,7 @@ class RuntimeSettingsFlowTests(unittest.TestCase):
                 "DOWN",
                 "DOWN",  # Album Art
                 "SELECT",
+                "DOWN",
                 "DOWN",  # Classic
                 "SELECT",
                 "QUIT",

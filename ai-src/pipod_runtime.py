@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat
 from settings_actions import BluetoothDevice, SettingsActionResult, SettingsActions
 from settings_store import PersistedSettings, SettingsStore
 
@@ -85,8 +85,14 @@ ALBUM_ART_UNSHARP_PERCENT = 180
 ALBUM_ART_UNSHARP_THRESHOLD = 2
 ALBUM_ART_GAMMA = 0.92
 ALBUM_ART_MODE_ENHANCED = "enhanced"
+ALBUM_ART_MODE_ENHANCED_PLUS = "enhanced_plus"
 ALBUM_ART_MODE_CLASSIC = "classic"
 DEFAULT_ALBUM_ART_MODE = ALBUM_ART_MODE_ENHANCED
+ALBUM_ART_MODE_CYCLE = (
+    ALBUM_ART_MODE_ENHANCED,
+    ALBUM_ART_MODE_ENHANCED_PLUS,
+    ALBUM_ART_MODE_CLASSIC,
+)
 _MODE_ICON_MASK_CACHE: dict[tuple[str, int, int], Image.Image | None] = {}
 UNKNOWN_ARTIST = "Unknown Artist"
 UNKNOWN_ALBUM = "Unknown Album"
@@ -1106,6 +1112,7 @@ def _settings_album_art_items(settings: PersistedSettings) -> tuple[SettingsItem
         )
 
     return (
+        mode_item(ALBUM_ART_MODE_ENHANCED_PLUS, "Enhanced+"),
         mode_item(ALBUM_ART_MODE_ENHANCED, "Enhanced"),
         mode_item(ALBUM_ART_MODE_CLASSIC, "Classic"),
     )
@@ -1248,6 +1255,8 @@ def load_album_art(track_path, size, cache, render_mode: str = DEFAULT_ALBUM_ART
             with source:
                 if mode == ALBUM_ART_MODE_CLASSIC:
                     art_image = _render_album_art_classic_for_epd(source, size, resample)
+                elif mode == ALBUM_ART_MODE_ENHANCED_PLUS:
+                    art_image = _render_album_art_enhanced_plus_for_epd(source, size, resample)
                 else:
                     art_image = _render_album_art_enhanced_for_epd(source, size, resample)
         except Exception:
@@ -1270,6 +1279,8 @@ def _normalize_album_art_mode(value: str | None) -> str:
     mode = str(value or "").strip().lower()
     if mode == ALBUM_ART_MODE_CLASSIC:
         return ALBUM_ART_MODE_CLASSIC
+    if mode == ALBUM_ART_MODE_ENHANCED_PLUS:
+        return ALBUM_ART_MODE_ENHANCED_PLUS
     return ALBUM_ART_MODE_ENHANCED
 
 
@@ -1295,6 +1306,122 @@ def _render_album_art_enhanced_for_epd(source: Image.Image, size: int, resample)
     else:
         dither = Image.FLOYDSTEINBERG
     return art.convert("1", dither=dither)
+
+
+def _render_album_art_enhanced_plus_for_epd(source: Image.Image, size: int, resample) -> Image.Image:
+    art = ImageOps.fit(source.convert("L"), (size, size), method=resample)
+    art = _preprocess_album_art_adaptive(art)
+    return _adaptive_dither_to_binary(art)
+
+
+def _preprocess_album_art_adaptive(art: Image.Image) -> Image.Image:
+    stat = ImageStat.Stat(art)
+    mean = float(stat.mean[0]) if stat.mean else 128.0
+    stddev = float(stat.stddev[0]) if stat.stddev else 0.0
+
+    if stddev < 35.0:
+        cutoff = 1
+        sharp_percent = 220
+        sharp_radius = 1.15
+        sharp_threshold = 1
+    elif stddev < 60.0:
+        cutoff = 2
+        sharp_percent = 180
+        sharp_radius = 1.0
+        sharp_threshold = 2
+    else:
+        cutoff = 3
+        sharp_percent = 140
+        sharp_radius = 0.9
+        sharp_threshold = 2
+
+    if mean > 165.0:
+        gamma = 0.86
+    elif mean < 90.0:
+        gamma = 1.02
+    else:
+        gamma = 0.93
+
+    art = ImageOps.autocontrast(art, cutoff=cutoff)
+    art = art.filter(
+        ImageFilter.UnsharpMask(
+            radius=sharp_radius,
+            percent=sharp_percent,
+            threshold=sharp_threshold,
+        )
+    )
+    return art.point(lambda value: int(255 * ((value / 255.0) ** gamma)))
+
+
+def _adaptive_dither_to_binary(art: Image.Image) -> Image.Image:
+    if hasattr(Image, "Dither"):
+        fs_dither = Image.Dither.FLOYDSTEINBERG
+    else:
+        fs_dither = Image.FLOYDSTEINBERG
+    fs_image = art.convert("1", dither=fs_dither)
+    ordered_image = _ordered_bayer_8x8_dither(art)
+
+    target_black = _target_black_ratio_from_grayscale(art)
+    fs_error = abs(_binary_black_ratio(fs_image) - target_black)
+    ordered_error = abs(_binary_black_ratio(ordered_image) - target_black)
+
+    if fs_error + 0.01 < ordered_error:
+        return fs_image
+    if ordered_error + 0.01 < fs_error:
+        return ordered_image
+
+    return fs_image if art.entropy() >= 5.2 else ordered_image
+
+
+def _target_black_ratio_from_grayscale(art: Image.Image) -> float:
+    stat = ImageStat.Stat(art)
+    mean = float(stat.mean[0]) if stat.mean else 128.0
+    return max(0.0, min(1.0, 1.0 - (mean / 255.0)))
+
+
+def _binary_black_ratio(image: Image.Image) -> float:
+    hist = image.histogram()
+    if not hist:
+        return 0.5
+    total = float(sum(hist))
+    if total <= 0:
+        return 0.5
+    black = float(hist[0])
+    return black / total
+
+
+def _ordered_bayer_8x8_dither(art: Image.Image) -> Image.Image:
+    bayer = (
+        (0, 48, 12, 60, 3, 51, 15, 63),
+        (32, 16, 44, 28, 35, 19, 47, 31),
+        (8, 56, 4, 52, 11, 59, 7, 55),
+        (40, 24, 36, 20, 43, 27, 39, 23),
+        (2, 50, 14, 62, 1, 49, 13, 61),
+        (34, 18, 46, 30, 33, 17, 45, 29),
+        (10, 58, 6, 54, 9, 57, 5, 53),
+        (42, 26, 38, 22, 41, 25, 37, 21),
+    )
+
+    src = art.convert("L")
+    width, height = src.size
+    src_px = src.load()
+    out = Image.new("1", (width, height), 255)
+    out_px = out.load()
+    for y in range(height):
+        row = bayer[y & 7]
+        for x in range(width):
+            threshold = int(((row[x & 7] + 0.5) * 255) / 64.0)
+            out_px[x, y] = 0 if src_px[x, y] < threshold else 255
+    return out
+
+
+def _next_album_art_mode(current_mode: str) -> str:
+    mode = _normalize_album_art_mode(current_mode)
+    try:
+        idx = ALBUM_ART_MODE_CYCLE.index(mode)
+    except ValueError:
+        return ALBUM_ART_MODE_CYCLE[0]
+    return ALBUM_ART_MODE_CYCLE[(idx + 1) % len(ALBUM_ART_MODE_CYCLE)]
 
 
 def draw_progress_bar(draw, x, y, width, height, progress_ratio):
@@ -3191,11 +3318,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                     set_selected_label(footer_status_label(library_totals_label, player))
                     should_redraw = True
                 elif current_view == "now_playing" and event == "TOGGLE_ART_MODE":
-                    new_mode = (
-                        ALBUM_ART_MODE_CLASSIC
-                        if album_art_render_mode == ALBUM_ART_MODE_ENHANCED
-                        else ALBUM_ART_MODE_ENHANCED
-                    )
+                    new_mode = _next_album_art_mode(album_art_render_mode)
                     set_settings_and_save(
                         PersistedSettings(
                             audio_output_mode=settings.audio_output_mode,

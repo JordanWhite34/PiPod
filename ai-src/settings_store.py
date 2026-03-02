@@ -11,7 +11,7 @@ DATA_DIR = ROOT_DIR / "data"
 DEFAULT_SETTINGS_PATH = DATA_DIR / "settings.json"
 DEFAULT_IMPORT_DIR = "/home/jrwhite/PiPodSync/inbox"
 VALID_AUDIO_OUTPUT_MODES = {"auto", "aux", "bluetooth"}
-VALID_ALBUM_ART_MODES = {"enhanced", "classic"}
+VALID_ALBUM_ART_MODES = {"enhanced", "enhanced_plus", "classic"}
 
 
 @dataclass(frozen=True)

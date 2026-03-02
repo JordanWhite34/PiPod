@@ -4,5 +4,4 @@ __pycache__/
 data/library.db
 data/settings.json
 ai-src/sim-output/
-music/*
-!music/.gitkeep
+
