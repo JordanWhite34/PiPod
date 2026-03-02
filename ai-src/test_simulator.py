@@ -17,6 +17,9 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from pipod_runtime import (
+    MUSIC_ITEM_SCROLL_DELAY_S,
+    MusicItem,
+    MusicViewState,
     NOW_PLAYING_ART_SIZE,
     NOW_PLAYING_ART_TOP,
     NOW_PLAYING_FOCUSABLE,
@@ -41,6 +44,7 @@ from pipod_runtime import (
     load_playlists_manifest,
     load_fonts,
     parse_input_token,
+    render_music_browser,
     render_settings_browser,
     render_now_playing,
     run_pipod_loop,
@@ -298,6 +302,7 @@ class SimulatorAdapterTests(unittest.TestCase):
 class SettingsRenderTests(unittest.TestCase):
     def test_settings_selected_item_scroll_delay_is_one_second(self):
         self.assertEqual(SETTINGS_ITEM_SCROLL_DELAY_S, 1.0)
+        self.assertEqual(MUSIC_ITEM_SCROLL_DELAY_S, 1.0)
 
     def test_render_settings_selected_row_scroll_changes_pixels(self):
         epd = FakeEPD(write_frames=False)
@@ -343,6 +348,52 @@ class SettingsRenderTests(unittest.TestCase):
         )
 
         row_box = (11, 34, epd.width - 9, 52)
+        self.assertNotEqual(image_start.crop(row_box).tobytes(), image_scrolled.crop(row_box).tobytes())
+
+    def test_render_music_selected_playlist_row_scroll_changes_pixels(self):
+        epd = FakeEPD(write_frames=False)
+        status = StatusPlumbing().read()
+        fonts = load_fonts()
+        long_label = (
+            "Road Trip Summer 2026 Extended Set With Very Long Playlist Name For Scroll Testing"
+        )
+        view = MusicViewState(
+            title="Playlists",
+            items=(
+                MusicItem(
+                    id="playlist:user:road_trip",
+                    label=long_label,
+                    icon="playlist",
+                    kind="playlist_group",
+                    track_paths=(),
+                    child_items=(MusicItem(id="playlist:user:road_trip:play_all", label="Play All", icon="song", kind="song"),),
+                ),
+            ),
+            selected_idx=0,
+        )
+
+        image_start = render_music_browser(
+            epd=epd,
+            fonts=fonts,
+            view_state=view,
+            status=status,
+            charge_anim_frame=0,
+            selected_label="test",
+            footer_scroll_px=0,
+            selected_item_scroll_px=0,
+        )
+        image_scrolled = render_music_browser(
+            epd=epd,
+            fonts=fonts,
+            view_state=view,
+            status=status,
+            charge_anim_frame=0,
+            selected_label="test",
+            footer_scroll_px=0,
+            selected_item_scroll_px=48,
+        )
+
+        row_box = (29, 34, epd.width - 18, 52)
         self.assertNotEqual(image_start.crop(row_box).tobytes(), image_scrolled.crop(row_box).tobytes())
 
 
@@ -517,8 +568,8 @@ class MusicBrowserTests(unittest.TestCase):
         )
         playlists_root = root_items[0]
         playlist_labels = [item.label for item in playlists_root.child_items]
-        self.assertEqual(playlist_labels[:3], ["Road Trip", "All Songs", "Shuffle All"])
-        self.assertEqual(playlists_root.child_items[0].track_paths, custom_playlist_paths)
+        self.assertEqual(playlist_labels[:3], ["All Songs", "Road Trip", "Shuffle All"])
+        self.assertEqual(playlists_root.child_items[1].track_paths, custom_playlist_paths)
 
     def _run_scripted(self, events: list[str]) -> tuple[dict, MockPlayer]:
         library = FixtureLibrary(FIXTURE_PATH, seed=1337)
@@ -618,12 +669,12 @@ class MusicBrowserTests(unittest.TestCase):
         self.assertEqual(stats["final_view"], "music_list")
         self.assertEqual(
             str(player.current_track_path()),
-            "/sim/Daft Punk/Discovery/02 Aerodynamic.mp3",
+            "/sim/Kendrick Lamar/good kid, m.A.A.d city/09 m.A.A.d city.mp3",
         )
         self.assertTrue(player.next_track())
         self.assertEqual(
             str(player.current_track_path()),
-            "/sim/Fleetwood Mac/Rumours/01 Dreams.mp3",
+            "/sim/Fleetwood Mac/Rumours/02 Never Going Back Again.mp3",
         )
 
     def test_playlists_shuffle_all_stays_in_music_view(self):

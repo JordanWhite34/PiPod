@@ -62,6 +62,10 @@ SETTINGS_ITEM_SCROLL_DELAY_S = 1.0
 SETTINGS_ITEM_SCROLL_INTERVAL_S = 0.12
 SETTINGS_ITEM_SCROLL_STEP_PX = 1
 SETTINGS_ITEM_SCROLL_GAP_PX = 24
+MUSIC_ITEM_SCROLL_DELAY_S = 1.0
+MUSIC_ITEM_SCROLL_INTERVAL_S = 0.12
+MUSIC_ITEM_SCROLL_STEP_PX = 1
+MUSIC_ITEM_SCROLL_GAP_PX = 24
 NOW_PLAYING_ART_SIZE = 96
 NOW_PLAYING_LEFT_MARGIN = 8
 NOW_PLAYING_CONTEXT_TOP = 4
@@ -662,7 +666,12 @@ def build_music_index(
         track_paths=(),
         child_items=(),
     )
-    playlists_items = tuple(playlist_items + [all_songs_playlist, shuffle_all_playlist])
+    playlists_items = tuple(
+        sorted(
+            [*playlist_items, all_songs_playlist, shuffle_all_playlist],
+            key=lambda item: item.label.casefold(),
+        )
+    )
 
     artist_map: dict[str, dict[str, list[MusicTrackEntry]]] = {}
     for entry in entries:
@@ -737,7 +746,16 @@ def build_music_index(
             item_id=f"song:{song.path}",
             label=f"{song.title} - {song.artist}",
         )
-        for song in entries
+        for song in sorted(
+            entries,
+            key=lambda entry: (
+                entry.title.casefold(),
+                entry.artist.casefold(),
+                entry.album.casefold(),
+                9999 if entry.track_no <= 0 else entry.track_no,
+                str(entry.path).casefold(),
+            ),
+        )
     )
 
     root_items = (
@@ -2575,6 +2593,7 @@ def render_music_browser(
     charge_anim_frame,
     selected_label=None,
     footer_scroll_px=0,
+    selected_item_scroll_px=0,
     footer_selected=False,
 ):
     image = Image.new("1", (epd.width, epd.height), 255)
@@ -2626,8 +2645,23 @@ def render_music_browser(
         has_children = bool(item.child_items)
         right_padding = 18 if has_children else 9
         label_width = max(0, epd.width - text_left - right_padding)
-        label = ellipsize_text(item.label, item_font, label_width)
-        draw.text((text_left, row_top), label, font=item_font, fill=fg)
+        if selected:
+            draw_scrolling_text_line(
+                image,
+                item_font,
+                item.label,
+                text_left,
+                row_top,
+                label_width,
+                18,
+                scroll_px=selected_item_scroll_px,
+                gap_px=MUSIC_ITEM_SCROLL_GAP_PX,
+                text_fill=255,
+                bg_fill=0,
+            )
+        else:
+            label = ellipsize_text(item.label, item_font, label_width)
+            draw.text((text_left, row_top), label, font=item_font, fill=fg)
         if has_children:
             draw_music_chevron(draw, epd.width - 14, row_top + 5, fg)
 
@@ -3160,6 +3194,11 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
     now_playing_song_should_scroll = False
     now_playing_song_last_scroll_tick = 0.0
     now_playing_song_scroll_start_tick = 0.0
+    music_item_scroll_key = ""
+    music_item_scroll_px = 0
+    music_item_should_scroll = False
+    music_item_last_scroll_tick = 0.0
+    music_item_scroll_start_tick = 0.0
     settings_item_scroll_key = ""
     settings_item_scroll_px = 0
     settings_item_should_scroll = False
@@ -3179,6 +3218,8 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
     footer_last_scroll_tick = now_clock()
     now_playing_song_last_scroll_tick = now_clock()
     now_playing_song_scroll_start_tick = now_clock()
+    music_item_last_scroll_tick = now_clock()
+    music_item_scroll_start_tick = now_clock()
     settings_item_last_scroll_tick = now_clock()
     settings_item_scroll_start_tick = now_clock()
     footer_should_scroll = False
@@ -3226,6 +3267,39 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
             return player.current_track_path() is not None
         except Exception:
             return False
+
+    def set_music_item_scroll_key(key_value, label_text, label_width):
+        nonlocal music_item_scroll_key
+        nonlocal music_item_scroll_px
+        nonlocal music_item_should_scroll
+        nonlocal music_item_last_scroll_tick
+        nonlocal music_item_scroll_start_tick
+        key_text = str(key_value or "").strip()
+        label_text = str(label_text or "").strip()
+        key = f"{key_text}|{int(label_width)}"
+        if key == music_item_scroll_key:
+            return False
+        music_item_scroll_key = key
+        music_item_scroll_px = 0
+        music_item_last_scroll_tick = now_clock()
+        music_item_scroll_start_tick = now_clock()
+        music_item_should_scroll = (
+            bool(label_text)
+            and int(label_width) > 0
+            and measure_text_width(label_text, fonts[1]) > int(label_width)
+        )
+        return True
+
+    def refresh_selected_music_scroll_state():
+        if not music_nav_stack:
+            return set_music_item_scroll_key("", "", 0)
+        view = _current_music_view(music_nav_stack)
+        if not view.items:
+            return set_music_item_scroll_key("", "", 0)
+        selected_item = view.items[_clamp_index(view.selected_idx, len(view.items))]
+        right_padding = 18 if bool(selected_item.child_items) else 9
+        label_width = max(0, epd.width - 29 - right_padding)
+        return set_music_item_scroll_key(selected_item.id, selected_item.label, label_width)
 
     def set_settings_item_scroll_key(key_value, label_text, label_width):
         nonlocal settings_item_scroll_key
@@ -3915,6 +3989,22 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                             now_playing_song_scroll_px += steps * NOW_PLAYING_TITLE_SCROLL_STEP_PX
                             should_redraw = True
 
+            if current_view in ("music_root", "music_list"):
+                if refresh_selected_music_scroll_state():
+                    should_redraw = True
+                elif music_item_should_scroll:
+                    now_tick = now_clock()
+                    if now_tick - music_item_scroll_start_tick >= MUSIC_ITEM_SCROLL_DELAY_S:
+                        elapsed = now_tick - music_item_last_scroll_tick
+                        steps = int(elapsed / MUSIC_ITEM_SCROLL_INTERVAL_S)
+                        if steps > 0:
+                            music_item_last_scroll_tick += steps * MUSIC_ITEM_SCROLL_INTERVAL_S
+                            music_item_scroll_px += steps * MUSIC_ITEM_SCROLL_STEP_PX
+                            should_redraw = True
+            else:
+                if music_item_scroll_key:
+                    set_music_item_scroll_key("", "", 0)
+
             if current_view in ("settings_root", "settings_list"):
                 refresh_settings_root_if_needed()
                 if refresh_selected_settings_scroll_state():
@@ -3974,6 +4064,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                         status_plumbing.charge_anim_frame(),
                         selected_label=selected_label,
                         footer_scroll_px=footer_scroll_px,
+                        selected_item_scroll_px=music_item_scroll_px,
                         footer_selected=footer_selected,
                     )
                 elif current_view in ("settings_root", "settings_list"):
