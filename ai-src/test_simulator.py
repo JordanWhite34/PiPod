@@ -658,6 +658,33 @@ class MusicBrowserTests(unittest.TestCase):
         self.assertIsNotNone(player.current_track_path())
         self.assertFalse(player.state().is_shuffle)
 
+    def test_menu_footer_select_enters_now_playing(self):
+        stats, _ = self._run_scripted(
+            [
+                "DOWN",  # Now Playing
+                "DOWN",  # Shuffle All
+                "DOWN",  # Settings
+                "DOWN",  # Footer
+                "SELECT",  # open now playing from footer
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "now_playing")
+
+    def test_music_footer_select_enters_now_playing(self):
+        stats, _ = self._run_scripted(
+            [
+                "SELECT",  # Music root
+                "DOWN",  # Artists
+                "DOWN",  # Albums
+                "DOWN",  # Songs
+                "DOWN",  # Footer
+                "SELECT",  # open now playing from footer
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "now_playing")
+
     def test_now_playing_toggle_art_mode_triggers_redraw(self):
         stats, _ = self._run_scripted(
             [
@@ -881,16 +908,18 @@ class RuntimeSettingsFlowTests(unittest.TestCase):
         self.assertEqual(stats["final_view"], "settings_list")
         self.assertIsNotNone(persisted.last_connected_bt_address)
 
-    def test_settings_music_sync_triggers_library_rescan(self):
+    def test_settings_library_rebuild_triggers_library_rescan(self):
         stats, _, state = self._run_scripted(
             [
                 "DOWN",
                 "DOWN",
                 "DOWN",  # Settings
                 "SELECT",
-                "DOWN",  # Music Sync
+                "DOWN",
+                "DOWN",
+                "DOWN",  # Library
                 "SELECT",
-                "SELECT",  # Sync From Import Folder
+                "SELECT",  # Rebuild Library Index
                 "QUIT",
             ]
         )
@@ -905,7 +934,6 @@ class RuntimeSettingsFlowTests(unittest.TestCase):
                 "DOWN",
                 "DOWN",  # Settings
                 "SELECT",
-                "DOWN",
                 "DOWN",
                 "DOWN",  # Album Art
                 "SELECT",

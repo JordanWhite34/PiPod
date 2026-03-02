@@ -885,12 +885,10 @@ def _normalize_bt_devices(raw_devices) -> list[BluetoothDevice]:
 def _settings_root_items(
     settings: PersistedSettings,
     bt_status: SettingsActionResult,
-    last_sync_result: str | None,
 ) -> tuple[SettingsItem, ...]:
     bt_suffix = "on" if bool(bt_status.details.get("powered", False)) else "off"
     if not bt_status.ok:
         bt_suffix = "unavailable"
-    sync_label = last_sync_result if last_sync_result else "Not yet synced"
     return (
         SettingsItem(
             id="settings:bluetooth",
@@ -898,13 +896,6 @@ def _settings_root_items(
             kind="submenu",
             help_text="Scan and pair headphones",
             action="open_bluetooth",
-        ),
-        SettingsItem(
-            id="settings:music_sync",
-            label="Music Sync",
-            kind="submenu",
-            help_text="Import music from computer drop folder",
-            action="open_music_sync",
         ),
         SettingsItem(
             id="settings:audio_output",
@@ -931,7 +922,7 @@ def _settings_root_items(
             id="settings:about",
             label="About",
             kind="submenu",
-            help_text=f"Last sync: {sync_label}",
+            help_text="System status and runtime info",
             action="open_about",
         ),
     )
@@ -1051,31 +1042,6 @@ def _settings_bluetooth_device_detail_items(device: BluetoothDevice) -> tuple[Se
             label=f"Status: {'connected' if device.connected else 'disconnected'}",
             kind="info",
             help_text=device.address,
-        ),
-    )
-
-
-def _settings_music_sync_items(settings: PersistedSettings, last_sync_result: str | None) -> tuple[SettingsItem, ...]:
-    sync_label = last_sync_result or "Not yet synced"
-    return (
-        SettingsItem(
-            id="settings:sync_run",
-            label="Sync From Import Folder",
-            kind="action",
-            help_text="Copy audio files and rescan library",
-            action="sync_music",
-        ),
-        SettingsItem(
-            id="settings:sync_path",
-            label=f"Import Folder: {settings.music_import_dir}",
-            kind="info",
-            help_text="Copy files here from your computer",
-        ),
-        SettingsItem(
-            id="settings:sync_last",
-            label=f"Last Sync: {sync_label}",
-            kind="info",
-            help_text="Most recent import summary",
         ),
     )
 
@@ -1449,12 +1415,14 @@ def draw_footer_text(
     width,
     height,
     scroll_px=0,
+    text_fill=0,
+    bg_fill=255,
 ):
     """Draw footer text and loop-scroll it when it exceeds available width."""
     if width <= 0 or height <= 0:
         return
 
-    footer = Image.new("1", (width, height), 255)
+    footer = Image.new("1", (width, height), bg_fill)
     footer_draw = ImageDraw.Draw(footer)
     text = str(text or "").strip()
     if not text:
@@ -1463,12 +1431,12 @@ def draw_footer_text(
 
     text_width = int(footer_draw.textlength(text, font=font) + 0.999)
     if text_width <= width:
-        footer_draw.text((0, 0), text, font=font, fill=0)
+        footer_draw.text((0, 0), text, font=font, fill=text_fill)
     else:
         cycle_width = text_width + FOOTER_SCROLL_GAP_PX
         offset = int(scroll_px) % cycle_width
-        footer_draw.text((-offset, 0), text, font=font, fill=0)
-        footer_draw.text((cycle_width - offset, 0), text, font=font, fill=0)
+        footer_draw.text((-offset, 0), text, font=font, fill=text_fill)
+        footer_draw.text((cycle_width - offset, 0), text, font=font, fill=text_fill)
 
     image.paste(footer, (x, y))
 
@@ -2366,6 +2334,7 @@ def render_menu(
     charge_anim_frame,
     selected_label=None,
     footer_scroll_px=0,
+    footer_selected=False,
 ):
     """Render a mono frame buffer for the main menu."""
     image = Image.new("1", (epd.width, epd.height), 255)
@@ -2404,6 +2373,11 @@ def render_menu(
     footer_width = epd.width - (footer_left * 2)
     footer_height = epd.height - footer_top
     draw.line((0, footer_top - 4, epd.width - 1, footer_top - 4), fill=0)
+    if footer_selected:
+        draw.rectangle(
+            (footer_left - 1, footer_top - 1, footer_left + footer_width - 1, epd.height - 1),
+            fill=0,
+        )
     footer_text = selected_label if selected_label else DEFAULT_FOOTER_TEXT
     draw_footer_text(
         image,
@@ -2414,6 +2388,8 @@ def render_menu(
         footer_width,
         footer_height,
         scroll_px=footer_scroll_px,
+        text_fill=255 if footer_selected else 0,
+        bg_fill=0 if footer_selected else 255,
     )
 
     return image
@@ -2427,6 +2403,7 @@ def render_music_browser(
     charge_anim_frame,
     selected_label=None,
     footer_scroll_px=0,
+    footer_selected=False,
 ):
     image = Image.new("1", (epd.width, epd.height), 255)
     draw = ImageDraw.Draw(image)
@@ -2486,6 +2463,11 @@ def render_music_browser(
         draw.text((11, start_y), "No music found", font=item_font, fill=0)
 
     draw.line((0, footer_top - 4, epd.width - 1, footer_top - 4), fill=0)
+    if footer_selected:
+        draw.rectangle(
+            (footer_left - 1, footer_top - 1, footer_left + footer_width - 1, epd.height - 1),
+            fill=0,
+        )
     footer_text = selected_label if selected_label else DEFAULT_FOOTER_TEXT
     draw_footer_text(
         image,
@@ -2496,6 +2478,8 @@ def render_music_browser(
         footer_width,
         footer_height,
         scroll_px=footer_scroll_px,
+        text_fill=255 if footer_selected else 0,
+        bg_fill=0 if footer_selected else 255,
     )
     return image
 
@@ -2509,6 +2493,7 @@ def render_settings_browser(
     selected_label=None,
     footer_scroll_px=0,
     selected_item_scroll_px=0,
+    footer_selected=False,
 ):
     image = Image.new("1", (epd.width, epd.height), 255)
     draw = ImageDraw.Draw(image)
@@ -2580,6 +2565,11 @@ def render_settings_browser(
         draw.text((11, start_y), "No settings available", font=item_font, fill=0)
 
     draw.line((0, footer_top - 4, epd.width - 1, footer_top - 4), fill=0)
+    if footer_selected:
+        draw.rectangle(
+            (footer_left - 1, footer_top - 1, footer_left + footer_width - 1, epd.height - 1),
+            fill=0,
+        )
     footer_text = selected_label if selected_label else "s select  b back"
     draw_footer_text(
         image,
@@ -2590,6 +2580,8 @@ def render_settings_browser(
         footer_width,
         footer_height,
         scroll_px=footer_scroll_px,
+        text_fill=255 if footer_selected else 0,
+        bg_fill=0 if footer_selected else 255,
     )
     return image
 
@@ -2933,7 +2925,6 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
     settings_nav_stack: list[SettingsViewState] = []
     settings = _safe_load_settings(settings_store)
     settings_last_result: str | None = None
-    last_sync_result: str | None = None
     settings_bt_status = _safe_settings_action(
         "bluetooth_adapter_status",
         settings_actions.bluetooth_adapter_status,
@@ -2954,6 +2945,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
     settings_item_scroll_start_tick = 0.0
     footer_width = epd.width - 12
     footer_scroll_px = 0
+    footer_selected = False
 
     virtual_clock = 0.0
 
@@ -3057,7 +3049,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
         return build_settings_view(
             view_id="settings_root",
             title="Settings",
-            items=_settings_root_items(settings, settings_bt_status, last_sync_result),
+            items=_settings_root_items(settings, settings_bt_status),
             selected_hint=selected_hint,
         )
 
@@ -3066,14 +3058,6 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
             view_id="settings_bluetooth",
             title="Bluetooth",
             items=_settings_bluetooth_items(settings_bt_status),
-            selected_hint=selected_hint,
-        )
-
-    def build_settings_music_sync_view(selected_hint: int = 0) -> SettingsViewState:
-        return build_settings_view(
-            view_id="settings_music_sync",
-            title="Music Sync",
-            items=_settings_music_sync_items(settings, last_sync_result),
             selected_hint=selected_hint,
         )
 
@@ -3196,6 +3180,17 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
         music_root_items = build_music_index(tracks, playlists=manifest_playlists)
         music_nav_stack = _restore_music_nav_stack(music_root_items, music_nav_stack)
 
+    def enter_now_playing():
+        nonlocal current_view
+        nonlocal now_playing_focus_index
+        nonlocal now_playing_last_progress_bucket
+        nonlocal footer_selected
+        current_view = "now_playing"
+        now_playing_focus_index = 1
+        now_playing_last_progress_bucket = -1
+        set_now_playing_song_text(_now_playing_song_artist_text(player, library))
+        footer_selected = False
+
     try:
         status = status_plumbing.read()
         sync_audio_output(status, player)
@@ -3218,6 +3213,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
             status_plumbing.charge_anim_frame(),
             selected_label,
             footer_scroll_px=footer_scroll_px,
+            footer_selected=footer_selected,
         )
         epd.displayPartBaseImage(epd.getbuffer(image))
         stats.frames_base += 1
@@ -3248,52 +3244,85 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                 if event == "QUIT":
                     break
                 if current_view == "menu" and event == "UP":
-                    selected_idx = (selected_idx - 1) % len(MENU_ITEMS)
+                    if footer_selected:
+                        footer_selected = False
+                        selected_idx = len(MENU_ITEMS) - 1
+                    else:
+                        selected_idx = (selected_idx - 1) % len(MENU_ITEMS)
                     should_redraw = True
                 elif current_view == "menu" and event == "DOWN":
-                    selected_idx = (selected_idx + 1) % len(MENU_ITEMS)
+                    if footer_selected:
+                        footer_selected = False
+                        selected_idx = 0
+                    elif selected_idx == len(MENU_ITEMS) - 1:
+                        footer_selected = True
+                    else:
+                        selected_idx += 1
                     should_redraw = True
                 elif current_view == "menu" and event == "SELECT":
-                    menu_item = MENU_ITEMS[selected_idx]
-                    if menu_item == "Music":
-                        music_nav_stack = [MusicViewState(title="Music", items=music_root_items, selected_idx=0)]
-                        current_view = _current_music_view_name(music_nav_stack)
+                    if footer_selected:
+                        enter_now_playing()
                         should_redraw = True
-                    elif menu_item == "Now Playing":
-                        current_view = "now_playing"
-                        now_playing_focus_index = 1
-                        now_playing_last_progress_bucket = -1
-                        set_now_playing_song_text(_now_playing_song_artist_text(player, library))
-                        should_redraw = True
-                    elif menu_item == "Settings":
-                        settings_bt_status = run_settings_action(
-                            "bluetooth_adapter_status",
-                            settings_actions.bluetooth_adapter_status,
-                        )
-                        enter_settings_root()
-                        should_redraw = True
-                    elif handle_menu_action(menu_item, library, player):
-                        should_redraw = True
+                    else:
+                        menu_item = MENU_ITEMS[selected_idx]
+                        if menu_item == "Music":
+                            music_nav_stack = [MusicViewState(title="Music", items=music_root_items, selected_idx=0)]
+                            current_view = _current_music_view_name(music_nav_stack)
+                            footer_selected = False
+                            should_redraw = True
+                        elif menu_item == "Now Playing":
+                            enter_now_playing()
+                            should_redraw = True
+                        elif menu_item == "Settings":
+                            settings_bt_status = run_settings_action(
+                                "bluetooth_adapter_status",
+                                settings_actions.bluetooth_adapter_status,
+                            )
+                            enter_settings_root()
+                            footer_selected = False
+                            should_redraw = True
+                        elif handle_menu_action(menu_item, library, player):
+                            should_redraw = True
                 elif current_view in ("music_root", "music_list") and event == "UP":
                     view = _current_music_view(music_nav_stack)
-                    if view.items:
+                    if footer_selected:
+                        footer_selected = False
+                        if view.items:
+                            view.selected_idx = len(view.items) - 1
+                    elif view.items:
                         view.selected_idx = (view.selected_idx - 1) % len(view.items)
-                        should_redraw = True
+                    else:
+                        footer_selected = True
+                    should_redraw = True
                 elif current_view in ("music_root", "music_list") and event == "DOWN":
                     view = _current_music_view(music_nav_stack)
-                    if view.items:
-                        view.selected_idx = (view.selected_idx + 1) % len(view.items)
-                        should_redraw = True
+                    if footer_selected:
+                        footer_selected = False
+                        if view.items:
+                            view.selected_idx = 0
+                    elif view.items:
+                        if view.selected_idx == len(view.items) - 1:
+                            footer_selected = True
+                        else:
+                            view.selected_idx += 1
+                    else:
+                        footer_selected = True
+                    should_redraw = True
                 elif current_view in ("music_root", "music_list") and event == "SELECT":
-                    view = _current_music_view(music_nav_stack)
-                    if view.items:
-                        selected_item = view.items[_clamp_index(view.selected_idx, len(view.items))]
-                        handled, next_view = _select_music_item(view, selected_item, player, library)
-                        should_redraw = handled or should_redraw
-                        if next_view is not None:
-                            music_nav_stack.append(next_view)
-                            current_view = _current_music_view_name(music_nav_stack)
-                            should_redraw = True
+                    if footer_selected:
+                        enter_now_playing()
+                        should_redraw = True
+                    else:
+                        view = _current_music_view(music_nav_stack)
+                        if view.items:
+                            selected_item = view.items[_clamp_index(view.selected_idx, len(view.items))]
+                            handled, next_view = _select_music_item(view, selected_item, player, library)
+                            should_redraw = handled or should_redraw
+                            if next_view is not None:
+                                music_nav_stack.append(next_view)
+                                current_view = _current_music_view_name(music_nav_stack)
+                                footer_selected = False
+                                should_redraw = True
                 elif current_view == "now_playing" and event == "UP":
                     now_playing_focus_index = (now_playing_focus_index - 1) % len(NOW_PLAYING_FOCUSABLE)
                     should_redraw = True
@@ -3315,6 +3344,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                 elif current_view == "now_playing" and event == "BACK":
                     current_view = "menu"
                     now_playing_last_progress_bucket = -1
+                    footer_selected = False
                     set_selected_label(footer_status_label(library_totals_label, player))
                     should_redraw = True
                 elif current_view == "now_playing" and event == "TOGGLE_ART_MODE":
@@ -3330,14 +3360,32 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                     should_redraw = True
                 elif current_view in ("settings_root", "settings_list") and event == "UP":
                     view = _current_settings_view(settings_nav_stack)
-                    if view.items:
+                    if footer_selected:
+                        footer_selected = False
+                        if view.items:
+                            view.selected_idx = len(view.items) - 1
+                    elif view.items:
                         view.selected_idx = (view.selected_idx - 1) % len(view.items)
-                        should_redraw = True
+                    else:
+                        footer_selected = True
+                    should_redraw = True
                 elif current_view in ("settings_root", "settings_list") and event == "DOWN":
                     view = _current_settings_view(settings_nav_stack)
-                    if view.items:
-                        view.selected_idx = (view.selected_idx + 1) % len(view.items)
-                        should_redraw = True
+                    if footer_selected:
+                        footer_selected = False
+                        if view.items:
+                            view.selected_idx = 0
+                    elif view.items:
+                        if view.selected_idx == len(view.items) - 1:
+                            footer_selected = True
+                        else:
+                            view.selected_idx += 1
+                    else:
+                        footer_selected = True
+                    should_redraw = True
+                elif current_view in ("settings_root", "settings_list") and event == "SELECT" and footer_selected:
+                    enter_now_playing()
+                    should_redraw = True
                 elif current_view in ("settings_root", "settings_list") and event == "SELECT":
                     view = _current_settings_view(settings_nav_stack)
                     if view.items:
@@ -3346,9 +3394,6 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                         if view.view_id == "settings_root":
                             if action == "open_bluetooth":
                                 push_settings_view(build_settings_bluetooth_view())
-                                current_view = _current_settings_view_name(settings_nav_stack)
-                            elif action == "open_music_sync":
-                                push_settings_view(build_settings_music_sync_view())
                                 current_view = _current_settings_view_name(settings_nav_stack)
                             elif action == "open_audio_output":
                                 push_settings_view(build_settings_audio_view())
@@ -3473,21 +3518,6 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                                         build_settings_bt_device_view(address, selected_hint=view.selected_idx)
                                     )
                                 should_redraw = True
-                        elif view.view_id == "settings_music_sync":
-                            if action == "sync_music":
-                                sync_result = run_settings_action(
-                                    "sync_music_from_import",
-                                    settings_actions.sync_music_from_import,
-                                    Path(settings.music_import_dir),
-                                )
-                                settings_last_result = sync_result.message
-                                last_sync_result = sync_result.message
-                                rebuild_music_index_and_nav(scan_library=True)
-                                replace_current_settings_view(
-                                    build_settings_music_sync_view(selected_hint=view.selected_idx)
-                                )
-                                refresh_settings_root_if_needed()
-                                should_redraw = True
                         elif view.view_id == "settings_audio":
                             if action == "set_audio_mode":
                                 mode = str(selected_item.value or "").strip().lower()
@@ -3541,16 +3571,20 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                     if len(music_nav_stack) > 1:
                         music_nav_stack.pop()
                         current_view = _current_music_view_name(music_nav_stack)
+                        footer_selected = False
                     else:
                         current_view = "menu"
+                        footer_selected = False
                         set_selected_label(footer_status_label(library_totals_label, player))
                     should_redraw = True
                 elif current_view in ("settings_root", "settings_list") and event == "BACK":
                     if len(settings_nav_stack) > 1:
                         settings_nav_stack.pop()
                         current_view = _current_settings_view_name(settings_nav_stack)
+                        footer_selected = False
                     else:
                         current_view = "menu"
+                        footer_selected = False
                         set_selected_label(footer_status_label(library_totals_label, player))
                     should_redraw = True
                 elif event == "PLAY_PAUSE":
@@ -3653,6 +3687,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                         status_plumbing.charge_anim_frame(),
                         selected_label=selected_label,
                         footer_scroll_px=footer_scroll_px,
+                        footer_selected=footer_selected,
                     )
                 elif current_view in ("settings_root", "settings_list"):
                     image = render_settings_browser(
@@ -3664,6 +3699,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                         selected_label=selected_label,
                         footer_scroll_px=footer_scroll_px,
                         selected_item_scroll_px=settings_item_scroll_px,
+                        footer_selected=footer_selected,
                     )
                 else:
                     image = render_menu(
@@ -3674,6 +3710,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                         status_plumbing.charge_anim_frame(),
                         selected_label,
                         footer_scroll_px=footer_scroll_px,
+                        footer_selected=footer_selected,
                     )
                 epd.displayPartial(epd.getbuffer(image))
                 stats.frames_partial += 1

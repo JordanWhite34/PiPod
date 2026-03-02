@@ -79,9 +79,11 @@ SCENARIOS: dict[str, list[str]] = {
         "DOWN",
         "DOWN",  # Settings
         "SELECT",  # enter settings root
-        "DOWN",  # Music Sync
+        "DOWN",
+        "DOWN",
+        "DOWN",  # Library
         "SELECT",
-        "SELECT",  # Sync From Import Folder
+        "SELECT",  # Rebuild Library Index
         "BACK",
         "BACK",
         "QUIT",
