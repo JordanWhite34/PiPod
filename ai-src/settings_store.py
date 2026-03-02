@@ -20,6 +20,7 @@ class PersistedSettings:
     music_import_dir: str = DEFAULT_IMPORT_DIR
     last_connected_bt_address: str | None = None
     album_art_mode: str = "enhanced"
+    now_playing_idle_art: str | None = None
 
     @classmethod
     def from_raw(cls, raw: dict | None) -> "PersistedSettings":
@@ -45,11 +46,18 @@ class PersistedSettings:
         if album_art_mode not in VALID_ALBUM_ART_MODES:
             album_art_mode = "enhanced"
 
+        now_playing_idle_art = raw.get("now_playing_idle_art")
+        if now_playing_idle_art is not None:
+            now_playing_idle_art = str(now_playing_idle_art).strip()
+            if not now_playing_idle_art:
+                now_playing_idle_art = None
+
         return cls(
             audio_output_mode=mode,
             music_import_dir=import_dir,
             last_connected_bt_address=last_bt,
             album_art_mode=album_art_mode,
+            now_playing_idle_art=now_playing_idle_art,
         )
 
 

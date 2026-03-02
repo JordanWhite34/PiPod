@@ -33,7 +33,11 @@ from pipod_runtime import (
     StatusPlumbing,
     VOLUME_SLIDER_KNOB_CENTER_Y_OFFSET,
     _volume_slider_knob_x,
+    _next_now_playing_idle_art_name,
+    _persist_now_playing_idle_art_image,
+    _resolve_now_playing_idle_art_path,
     build_music_index,
+    load_now_playing_idle_art,
     load_playlists_manifest,
     load_fonts,
     parse_input_token,
@@ -222,6 +226,73 @@ class SimulatorAdapterTests(unittest.TestCase):
             NOW_PLAYING_FOCUSABLE,
             ("PREV", "PLAY_PAUSE", "NEXT", "SHUFFLE", "LOOP"),
         )
+
+    def test_resolve_now_playing_idle_art_path_uses_selected_when_available(self):
+        first = Path("/tmp/first.png")
+        second = Path("/tmp/second.png")
+        with mock.patch("pipod_runtime._list_now_playing_idle_art_paths", return_value=(first, second)):
+            chosen = _resolve_now_playing_idle_art_path("second.png")
+        self.assertEqual(chosen, second)
+
+    def test_resolve_now_playing_idle_art_path_falls_back_to_first(self):
+        first = Path("/tmp/first.png")
+        second = Path("/tmp/second.png")
+        with mock.patch("pipod_runtime._list_now_playing_idle_art_paths", return_value=(first, second)):
+            chosen = _resolve_now_playing_idle_art_path("missing.png")
+        self.assertEqual(chosen, first)
+
+    def test_next_now_playing_idle_art_name_cycles(self):
+        first = Path("/tmp/first.png")
+        second = Path("/tmp/second.png")
+        third = Path("/tmp/third.png")
+        with mock.patch("pipod_runtime._list_now_playing_idle_art_paths", return_value=(first, second, third)):
+            self.assertEqual(_next_now_playing_idle_art_name("second.png"), "third.png")
+            self.assertEqual(_next_now_playing_idle_art_name("third.png"), "first.png")
+            self.assertEqual(_next_now_playing_idle_art_name(None), "first.png")
+
+    def test_persist_now_playing_idle_art_image_writes_png(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.jpg"
+            target = root / "persisted_idle_cover.png"
+            Image.new("RGB", (8, 8), "red").save(source, format="JPEG")
+            with (
+                mock.patch("pipod_runtime._resolve_now_playing_idle_art_path", return_value=source),
+                mock.patch("pipod_runtime.NOW_PLAYING_IDLE_ART_PERSIST_PATH", target),
+            ):
+                self.assertTrue(_persist_now_playing_idle_art_image("source.jpg"))
+            self.assertTrue(target.exists())
+            with Image.open(target) as persisted:
+                self.assertEqual(persisted.format, "PNG")
+
+    def test_load_now_playing_idle_art_uses_persisted_fallback_when_assets_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            persisted = root / "persisted_idle_cover.png"
+            Image.new("RGB", (20, 20), "black").save(persisted, format="PNG")
+            with (
+                mock.patch("pipod_runtime._list_now_playing_idle_art_paths", return_value=()),
+                mock.patch("pipod_runtime.NOW_PLAYING_IDLE_ART_PERSIST_PATH", persisted),
+            ):
+                art = load_now_playing_idle_art(16, {}, render_mode="classic", selected_name="missing.png")
+            self.assertIsNotNone(art)
+            self.assertEqual(art.size, (16, 16))
+
+    def test_load_now_playing_idle_art_prefers_persisted_when_selected_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            asset = root / "asset.png"
+            persisted = root / "persisted_idle_cover.png"
+            Image.new("RGB", (20, 20), "white").save(asset, format="PNG")
+            Image.new("RGB", (20, 20), "black").save(persisted, format="PNG")
+            with (
+                mock.patch("pipod_runtime._list_now_playing_idle_art_paths", return_value=(asset,)),
+                mock.patch("pipod_runtime.NOW_PLAYING_IDLE_ART_PERSIST_PATH", persisted),
+            ):
+                art = load_now_playing_idle_art(16, {}, render_mode="classic", selected_name="missing.png")
+            self.assertIsNotNone(art)
+            self.assertEqual(art.size, (16, 16))
+            self.assertEqual(art.getpixel((0, 0)), 0)
 
 
 class SettingsRenderTests(unittest.TestCase):
@@ -776,6 +847,15 @@ class SettingsStoreTests(unittest.TestCase):
             actual = store.load()
             self.assertEqual(actual, expected)
 
+    def test_settings_store_round_trip_with_now_playing_idle_art(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            store = SettingsStore(settings_path)
+            expected = PersistedSettings(now_playing_idle_art="raccoon.png")
+            store.save(expected)
+            actual = store.load()
+            self.assertEqual(actual.now_playing_idle_art, "raccoon.png")
+
     def test_settings_store_migrates_legacy_speaker_mode_to_aux(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_path = Path(temp_dir) / "settings.json"
@@ -1065,6 +1145,30 @@ class RuntimeSettingsFlowTests(unittest.TestCase):
         _, persisted = state
         self.assertEqual(stats["final_view"], "settings_list")
         self.assertEqual(persisted.album_art_mode, "classic")
+
+    def test_settings_album_art_idle_cover_cycles_and_persists(self):
+        first = Path("/tmp/first.png")
+        second = Path("/tmp/second.png")
+        with mock.patch("pipod_runtime._list_now_playing_idle_art_paths", return_value=(first, second)):
+            stats, _, state = self._run_scripted(
+                [
+                    "DOWN",
+                    "DOWN",
+                    "DOWN",  # Settings
+                    "SELECT",
+                    "DOWN",
+                    "DOWN",  # Album Art
+                    "SELECT",
+                    "DOWN",
+                    "DOWN",
+                    "DOWN",  # Idle Cover
+                    "SELECT",
+                    "QUIT",
+                ]
+            )
+        _, persisted = state
+        self.assertEqual(stats["final_view"], "settings_list")
+        self.assertEqual(persisted.now_playing_idle_art, "first.png")
 
     def test_unavailable_bluetooth_actions_do_not_crash(self):
         class UnavailableSettingsActions(FakeSettingsActions):

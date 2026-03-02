@@ -26,8 +26,10 @@ ROOT_DIR = APP_DIR.parent
 PIC_DIR = ROOT_DIR / "pic"
 FONT_PATH = PIC_DIR / "Font.ttc"
 ICONS_DIR = APP_DIR / "assets" / "icons"
+NOW_PLAYING_ASSETS_DIR = APP_DIR / "assets" / "now_playing"
 SHUFFLE_ICON_PATH = ICONS_DIR / "shuffle_thick.png"
 LOOP_ICON_PATH = ICONS_DIR / "loop.png"
+NOW_PLAYING_IDLE_ART_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 MUSIC_DIR_ENV_VAR = "PIPOD_MUSIC_DIR"
 DEFAULT_MUSIC_DIR = ROOT_DIR / "music"
 PLAYLISTS_MANIFEST_NAME = "playlists.json"
@@ -36,6 +38,7 @@ MUSIC_DIR = Path(
 ).expanduser().resolve()
 DATA_DIR = ROOT_DIR / "data"
 LIBRARY_DB_PATH = DATA_DIR / "library.db"
+NOW_PLAYING_IDLE_ART_PERSIST_PATH = DATA_DIR / "persisted_idle_cover.png"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -62,7 +65,7 @@ SETTINGS_ITEM_SCROLL_GAP_PX = 24
 NOW_PLAYING_ART_SIZE = 96
 NOW_PLAYING_LEFT_MARGIN = 8
 NOW_PLAYING_CONTEXT_TOP = 4
-NOW_PLAYING_CONTEXT_RIGHT_PADDING = 20
+NOW_PLAYING_CONTEXT_FONT_SIZE = 10
 NOW_PLAYING_ART_TOP = 20
 NOW_PLAYING_PROGRESS_TOP_GAP = 8
 NOW_PLAYING_TIME_TOP_GAP = 11
@@ -1081,10 +1084,31 @@ def _settings_album_art_items(settings: PersistedSettings) -> tuple[SettingsItem
             value=mode,
         )
 
+    selected_idle_art, selected_idle_idx, total_idle_art = _idle_art_selection_details(
+        settings.now_playing_idle_art
+    )
+    if total_idle_art <= 0 or selected_idle_art is None:
+        idle_art_item = SettingsItem(
+            id="settings:album_art:idle:none",
+            label="Idle Cover (0/0)",
+            kind="info",
+            help_text=f"Add images to {NOW_PLAYING_ASSETS_DIR}",
+        )
+    else:
+        idle_art_item = SettingsItem(
+            id=f"settings:album_art:idle:{selected_idle_art.name}",
+            label=f"Idle Cover ({selected_idle_idx}/{total_idle_art})",
+            kind="action",
+            help_text=f"{selected_idle_art.name} (select for next)",
+            action="cycle_now_playing_idle_art",
+            value=selected_idle_art.name,
+        )
+
     return (
         mode_item(ALBUM_ART_MODE_ENHANCED_PLUS, "Enhanced+"),
         mode_item(ALBUM_ART_MODE_ENHANCED, "Enhanced"),
         mode_item(ALBUM_ART_MODE_CLASSIC, "Classic"),
+        idle_art_item,
     )
 
 
@@ -1222,6 +1246,150 @@ def load_album_art(track_path, size, cache, render_mode: str = DEFAULT_ALBUM_ART
                 source = Image.open(io.BytesIO(art_bytes))
             else:
                 source = Image.open(source_path)
+            with source:
+                if mode == ALBUM_ART_MODE_CLASSIC:
+                    art_image = _render_album_art_classic_for_epd(source, size, resample)
+                elif mode == ALBUM_ART_MODE_ENHANCED_PLUS:
+                    art_image = _render_album_art_enhanced_plus_for_epd(source, size, resample)
+                else:
+                    art_image = _render_album_art_enhanced_for_epd(source, size, resample)
+        except Exception:
+            art_image = None
+
+    cache[cache_key] = art_image
+    return art_image
+
+
+def _list_now_playing_idle_art_paths() -> tuple[Path, ...]:
+    if not NOW_PLAYING_ASSETS_DIR.exists() or not NOW_PLAYING_ASSETS_DIR.is_dir():
+        return ()
+    entries: list[Path] = []
+    for candidate in NOW_PLAYING_ASSETS_DIR.iterdir():
+        if not candidate.is_file():
+            continue
+        if candidate.suffix.lower() not in NOW_PLAYING_IDLE_ART_EXTENSIONS:
+            continue
+        entries.append(candidate)
+    entries.sort(key=lambda path: path.name.casefold())
+    return tuple(entries)
+
+
+def _resolve_now_playing_idle_art_path(
+    selected_name: str | None = None,
+    *,
+    fallback_to_first: bool = True,
+) -> Path | None:
+    art_paths = _list_now_playing_idle_art_paths()
+    if not art_paths:
+        return None
+
+    chosen_name = Path(str(selected_name or "").strip()).name
+    if chosen_name:
+        for candidate in art_paths:
+            if candidate.name == chosen_name:
+                return candidate
+        chosen_name_folded = chosen_name.casefold()
+        for candidate in art_paths:
+            if candidate.name.casefold() == chosen_name_folded:
+                return candidate
+
+    if fallback_to_first:
+        return art_paths[0]
+    return None
+
+
+def _idle_art_selection_details(selected_name: str | None = None) -> tuple[Path | None, int, int]:
+    art_paths = _list_now_playing_idle_art_paths()
+    total = len(art_paths)
+    if total == 0:
+        return None, 0, 0
+
+    selected_path = _resolve_now_playing_idle_art_path(selected_name)
+    if selected_path is None:
+        selected_path = art_paths[0]
+
+    selected_idx = 1
+    for idx, candidate in enumerate(art_paths, start=1):
+        if candidate == selected_path:
+            selected_idx = idx
+            break
+    return selected_path, selected_idx, total
+
+
+def _next_now_playing_idle_art_name(selected_name: str | None = None) -> str | None:
+    art_paths = _list_now_playing_idle_art_paths()
+    total = len(art_paths)
+    if total == 0:
+        return None
+
+    selected_path = _resolve_now_playing_idle_art_path(selected_name, fallback_to_first=False)
+    if selected_path is None:
+        return art_paths[0].name
+
+    try:
+        current_idx = art_paths.index(selected_path)
+    except ValueError:
+        return art_paths[0].name
+    return art_paths[(current_idx + 1) % total].name
+
+
+def _persist_now_playing_idle_art_image(selected_name: str | None = None) -> bool:
+    source_path = _resolve_now_playing_idle_art_path(selected_name, fallback_to_first=False)
+    if source_path is None:
+        return False
+
+    try:
+        NOW_PLAYING_IDLE_ART_PERSIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = NOW_PLAYING_IDLE_ART_PERSIST_PATH.with_name(
+            f"{NOW_PLAYING_IDLE_ART_PERSIST_PATH.name}.tmp"
+        )
+        with Image.open(source_path) as source:
+            source.convert("RGB").save(temp_path, format="PNG")
+        temp_path.replace(NOW_PLAYING_IDLE_ART_PERSIST_PATH)
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_persisted_now_playing_idle_art_path() -> Path | None:
+    try:
+        if NOW_PLAYING_IDLE_ART_PERSIST_PATH.exists() and NOW_PLAYING_IDLE_ART_PERSIST_PATH.is_file():
+            return NOW_PLAYING_IDLE_ART_PERSIST_PATH
+    except Exception:
+        return None
+    return None
+
+
+def load_now_playing_idle_art(
+    size,
+    cache,
+    render_mode: str = DEFAULT_ALBUM_ART_MODE,
+    selected_name: str | None = None,
+):
+    mode = _normalize_album_art_mode(render_mode)
+    source_path = _resolve_now_playing_idle_art_path(selected_name, fallback_to_first=False)
+    if source_path is None:
+        source_path = _resolve_persisted_now_playing_idle_art_path()
+    if source_path is None:
+        source_path = _resolve_now_playing_idle_art_path(selected_name, fallback_to_first=True)
+    source_key = ""
+    if source_path is not None:
+        try:
+            source_key = f"{source_path.resolve()}:{source_path.stat().st_mtime_ns}"
+        except Exception:
+            source_key = str(source_path)
+    cache_key = (f"idle:{source_key}", mode, int(size))
+    if cache_key in cache:
+        return cache[cache_key]
+
+    art_image = None
+    if source_path is not None:
+        try:
+            if hasattr(Image, "Resampling"):
+                resample = Image.Resampling.LANCZOS
+            else:
+                resample = Image.LANCZOS
+            source = Image.open(source_path)
             with source:
                 if mode == ALBUM_ART_MODE_CLASSIC:
                     art_image = _render_album_art_classic_for_epd(source, size, resample)
@@ -2602,19 +2770,25 @@ def render_now_playing(
     focus_index=1,
     song_scroll_px=0,
     context_label="",
+    idle_art_selection=None,
 ):
     """Render a mono frame buffer for album art + progress playback view."""
     image = Image.new("1", (epd.width, epd.height), 255)
     draw = ImageDraw.Draw(image)
     _, item_font, hint_font = fonts
+    try:
+        context_font = ImageFont.truetype(str(FONT_PATH), NOW_PLAYING_CONTEXT_FONT_SIZE)
+    except Exception:
+        context_font = hint_font
 
     left = NOW_PLAYING_LEFT_MARGIN
     max_width = epd.width - (left * 2)
     state = player.state()
-    context_width = max(0, epd.width - left - NOW_PLAYING_CONTEXT_RIGHT_PADDING)
-    context_text = ellipsize_text(str(context_label or "").strip(), hint_font, context_width)
+    context_width = max(0, epd.width - (left * 2))
+    context_text = ellipsize_text(str(context_label or "").strip(), context_font, context_width)
     if context_text:
-        draw.text((left, NOW_PLAYING_CONTEXT_TOP), context_text, font=hint_font, fill=0)
+        context_x = max(left, (epd.width - measure_text_width(context_text, context_font)) // 2)
+        draw.text((context_x, NOW_PLAYING_CONTEXT_TOP), context_text, font=context_font, fill=0)
 
     progress_s, progress_duration_s = player.playback_progress()
     art_left = (epd.width - NOW_PLAYING_ART_SIZE) // 2
@@ -2634,8 +2808,17 @@ def render_now_playing(
         song_name = "Audio unavailable"
         artist_name = state.error or "unknown"
     elif state.current_track is None:
-        draw.rectangle((art_left, art_top, art_right, art_bottom), outline=0, fill=255)
-        draw.text((art_left + 12, art_top + 40), "NO COVER", font=item_font, fill=0)
+        idle_art = load_now_playing_idle_art(
+            NOW_PLAYING_ART_SIZE,
+            album_art_cache,
+            render_mode=album_art_render_mode,
+            selected_name=idle_art_selection,
+        )
+        if idle_art is not None:
+            image.paste(idle_art, (art_left, art_top))
+        else:
+            draw.rectangle((art_left, art_top, art_right, art_bottom), outline=0, fill=255)
+            draw.text((art_left + 12, art_top + 40), "NO COVER", font=item_font, fill=0)
         song_name = "Nothing queued"
         artist_name = "Press Play"
     else:
@@ -3419,6 +3602,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                             music_import_dir=settings.music_import_dir,
                             last_connected_bt_address=settings.last_connected_bt_address,
                             album_art_mode=new_mode,
+                            now_playing_idle_art=settings.now_playing_idle_art,
                         )
                     )
                     should_redraw = True
@@ -3510,6 +3694,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                                             music_import_dir=settings.music_import_dir,
                                             last_connected_bt_address=selected_item.address,
                                             album_art_mode=settings.album_art_mode,
+                                            now_playing_idle_art=settings.now_playing_idle_art,
                                         )
                                     )
                                     settings_bt_status = run_settings_action(
@@ -3539,6 +3724,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                                                 music_import_dir=settings.music_import_dir,
                                                 last_connected_bt_address=address,
                                                 album_art_mode=settings.album_art_mode,
+                                                now_playing_idle_art=settings.now_playing_idle_art,
                                             )
                                         )
                                 elif action == "bt_disconnect":
@@ -3560,6 +3746,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                                                 music_import_dir=settings.music_import_dir,
                                                 last_connected_bt_address=None,
                                                 album_art_mode=settings.album_art_mode,
+                                                now_playing_idle_art=settings.now_playing_idle_art,
                                             )
                                         )
                                 settings_last_result = action_result.message
@@ -3592,6 +3779,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                                             music_import_dir=settings.music_import_dir,
                                             last_connected_bt_address=settings.last_connected_bt_address,
                                             album_art_mode=settings.album_art_mode,
+                                            now_playing_idle_art=settings.now_playing_idle_art,
                                         )
                                     )
                                     settings_last_result = f"Audio mode set to {mode}"
@@ -3609,6 +3797,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                                         music_import_dir=settings.music_import_dir,
                                         last_connected_bt_address=settings.last_connected_bt_address,
                                         album_art_mode=mode,
+                                        now_playing_idle_art=settings.now_playing_idle_art,
                                     )
                                 )
                                 settings_last_result = f"Album art mode set to {mode}"
@@ -3616,6 +3805,34 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                                     build_settings_album_art_view(selected_hint=view.selected_idx)
                                 )
                                 refresh_settings_root_if_needed()
+                                should_redraw = True
+                            elif action == "cycle_now_playing_idle_art":
+                                next_idle_art_name = _next_now_playing_idle_art_name(
+                                    settings.now_playing_idle_art
+                                )
+                                set_settings_and_save(
+                                    PersistedSettings(
+                                        audio_output_mode=settings.audio_output_mode,
+                                        music_import_dir=settings.music_import_dir,
+                                        last_connected_bt_address=settings.last_connected_bt_address,
+                                        album_art_mode=settings.album_art_mode,
+                                        now_playing_idle_art=next_idle_art_name,
+                                    )
+                                )
+                                _persist_now_playing_idle_art_image(next_idle_art_name)
+                                selected_idle_art, selected_idle_idx, total_idle_art = _idle_art_selection_details(
+                                    next_idle_art_name
+                                )
+                                if total_idle_art <= 0 or selected_idle_art is None:
+                                    settings_last_result = "No idle covers available"
+                                else:
+                                    settings_last_result = (
+                                        f"Idle cover {selected_idle_idx}/{total_idle_art}: "
+                                        f"{selected_idle_art.name}"
+                                    )
+                                replace_current_settings_view(
+                                    build_settings_album_art_view(selected_hint=view.selected_idx)
+                                )
                                 should_redraw = True
                         elif view.view_id == "settings_library":
                             if action == "rebuild_library":
@@ -3746,6 +3963,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                         focus_index=now_playing_focus_index,
                         song_scroll_px=now_playing_song_scroll_px,
                         context_label=now_playing_context_label,
+                        idle_art_selection=settings.now_playing_idle_art,
                     )
                 elif current_view in ("music_root", "music_list"):
                     image = render_music_browser(
