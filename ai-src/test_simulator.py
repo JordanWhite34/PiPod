@@ -42,6 +42,8 @@ from pipod_runtime import (
     _infer_now_playing_idle_art_name_from_persisted_image,
     _resolve_now_playing_idle_art_selection_name,
     _resolve_now_playing_idle_art_path,
+    _settings_bluetooth_other_items,
+    _settings_bluetooth_scan_items,
     build_music_index,
     load_now_playing_idle_art,
     load_playlists_manifest,
@@ -577,7 +579,7 @@ class GpioInputProviderTests(unittest.TestCase):
             },
         ):
             config = GpioFiveWayConfig.from_env()
-        self.assertEqual(config.up_pin, 5)
+        self.assertEqual(config.up_pin, 23)
         self.assertEqual(config.down_pin, 6)
         self.assertEqual(config.left_pin, 12)
         self.assertEqual(config.right_pin, 13)
@@ -626,7 +628,7 @@ class GpioInputProviderTests(unittest.TestCase):
 
         config = GpioFiveWayConfig(
             enabled=True,
-            up_pin=5,
+            up_pin=23,
             down_pin=6,
             left_pin=12,
             right_pin=13,
@@ -1524,6 +1526,45 @@ class SettingsActionsTests(unittest.TestCase):
         self.assertEqual(result.details["raw_nearby_count"], 4)
         self.assertEqual(result.details["known_count"], 1)
         self.assertEqual(result.message, "Found 1 named nearby, 1 known, 1 paired")
+
+    def test_bluetooth_scan_splits_numeric_prefix_names_into_other_devices(self):
+        actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
+        main_device = BluetoothDevice(address="AA:BB:CC:DD:EE:01", name="Pixel Buds")
+        other_digit_digit = BluetoothDevice(address="AA:BB:CC:DD:EE:02", name="12 Headphones")
+        other_digit_letter = BluetoothDevice(address="AA:BB:CC:DD:EE:03", name="1A Speaker")
+
+        visible, other = actions._split_other_scan_devices(
+            [main_device, other_digit_digit, other_digit_letter]
+        )
+
+        self.assertEqual(visible, [main_device])
+        self.assertEqual(other, [other_digit_digit, other_digit_letter])
+
+    def test_scan_result_items_put_other_devices_behind_other_subtab(self):
+        result = SettingsActionResult(
+            ok=True,
+            message="scan",
+            details={
+                "devices": [
+                    BluetoothDevice(address="AA:BB:CC:DD:EE:01", name="Pixel Buds"),
+                ],
+                "other_devices": [
+                    BluetoothDevice(address="AA:BB:CC:DD:EE:02", name="12 Headphones"),
+                    BluetoothDevice(address="AA:BB:CC:DD:EE:03", name="1A Speaker"),
+                ],
+            },
+        )
+
+        scan_items = _settings_bluetooth_scan_items(result)
+        other_items = _settings_bluetooth_other_items(result)
+
+        self.assertIn("Pair: Pixel Buds (new)", [item.label for item in scan_items])
+        self.assertIn("Other (2)", [item.label for item in scan_items])
+        self.assertNotIn("Pair: 12 Headphones (new)", [item.label for item in scan_items])
+        self.assertEqual(
+            [item.label for item in other_items],
+            ["Pair: 12 Headphones (new)", "Pair: 1A Speaker (new)"],
+        )
 
     def test_bluetooth_saved_devices_include_named_known_devices_when_paired_list_is_empty(self):
         actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)

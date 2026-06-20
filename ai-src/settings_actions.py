@@ -34,6 +34,7 @@ _SCAN_CHANGED_NAME_LINE = re.compile(
     r"^\[CHG\]\s+Device\s+([0-9A-F:]{17})\s+(?:Name|Alias):\s+(.+)$",
     flags=re.IGNORECASE,
 )
+_OTHER_SCAN_NAME = re.compile(r"^\s*\d(?:\d|[A-Za-z])")
 _ANSI_ESCAPE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
 
@@ -134,6 +135,7 @@ class SettingsActions:
         paired_devices = self._list_devices(command="paired-devices")
         merged_devices = self._merge_devices(discovered_devices, known_devices, paired_devices)
         devices = self._devices_with_state(merged_devices)
+        visible_devices, other_devices = self._split_other_scan_devices(devices)
         nearby_count = len({address for address, _ in discovered_devices})
         raw_nearby_count = len({address for address, _ in raw_discovered_devices})
         known_count = len({address for address, _ in known_devices})
@@ -142,11 +144,13 @@ class SettingsActions:
             ok=True,
             message=f"Found {nearby_count} named nearby, {known_count} known, {paired_count} paired",
             details={
-                "devices": devices,
+                "devices": visible_devices,
+                "other_devices": other_devices,
                 "nearby_count": nearby_count,
                 "raw_nearby_count": raw_nearby_count,
                 "known_count": known_count,
                 "paired_count": paired_count,
+                "other_count": len(other_devices),
             },
         )
 
@@ -536,6 +540,24 @@ class SettingsActions:
             for address, name in devices
             if cls._is_useful_scan_name(address, name)
         ]
+
+    @classmethod
+    def _split_other_scan_devices(
+        cls,
+        devices: Iterable[BluetoothDevice],
+    ) -> tuple[list[BluetoothDevice], list[BluetoothDevice]]:
+        visible: list[BluetoothDevice] = []
+        other: list[BluetoothDevice] = []
+        for device in devices:
+            if cls._is_other_scan_name(device.name):
+                other.append(device)
+            else:
+                visible.append(device)
+        return visible, other
+
+    @staticmethod
+    def _is_other_scan_name(name: str) -> bool:
+        return _OTHER_SCAN_NAME.match(str(name or "")) is not None
 
     @staticmethod
     def _is_useful_scan_name(address: str, name: str) -> bool:

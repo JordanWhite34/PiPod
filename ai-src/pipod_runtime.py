@@ -987,6 +987,7 @@ def _settings_bluetooth_items(bt_status: SettingsActionResult) -> tuple[Settings
 
 def _settings_bluetooth_scan_items(result: SettingsActionResult) -> tuple[SettingsItem, ...]:
     devices = _normalize_bt_devices(result.details.get("devices", []))
+    other_devices = _normalize_bt_devices(result.details.get("other_devices", []))
     items: list[SettingsItem] = [
         SettingsItem(
             id="settings:bt_scan_again",
@@ -1009,6 +1010,16 @@ def _settings_bluetooth_scan_items(result: SettingsActionResult) -> tuple[Settin
                 address=device.address,
             )
         )
+    if other_devices:
+        items.append(
+            SettingsItem(
+                id="settings:bt_scan_other",
+                label=f"Other ({len(other_devices)})",
+                kind="submenu",
+                help_text="Devices with numeric names",
+                action="bt_scan_other",
+            )
+        )
     if len(items) == 1:
         items.append(
             SettingsItem(
@@ -1016,6 +1027,34 @@ def _settings_bluetooth_scan_items(result: SettingsActionResult) -> tuple[Settin
                 label="No devices found",
                 kind="info",
                 help_text="Put headphones in pairing mode, then scan again",
+            )
+        )
+    return tuple(items)
+
+
+def _settings_bluetooth_other_items(result: SettingsActionResult) -> tuple[SettingsItem, ...]:
+    devices = _normalize_bt_devices(result.details.get("other_devices", []))
+    items: list[SettingsItem] = []
+    for device in devices:
+        state = "connected" if device.connected else "paired" if device.paired else "new"
+        action_label = "Use" if device.connected else "Connect" if device.paired else "Pair"
+        items.append(
+            SettingsItem(
+                id=f"settings:bt_scan_other:{device.address}",
+                label=f"{action_label}: {device.name} ({state})",
+                kind="action",
+                help_text="Pair/trust/connect with bluetoothctl",
+                action="bt_pair_connect",
+                address=device.address,
+            )
+        )
+    if not items:
+        items.append(
+            SettingsItem(
+                id="settings:bt_scan_other_none",
+                label="No other devices",
+                kind="info",
+                help_text="Back to scan results",
             )
         )
     return tuple(items)
@@ -3432,6 +3471,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
         )
         _safe_save_settings(settings_store, settings)
     settings_last_result: str | None = None
+    settings_last_scan_result: SettingsActionResult | None = None
     settings_bt_status = _safe_settings_action(
         "bluetooth_adapter_status",
         settings_actions.bluetooth_adapter_status,
@@ -3664,6 +3704,14 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
             view_id="settings_bt_scan",
             title="Scan Results",
             items=_settings_bluetooth_scan_items(result),
+            selected_hint=selected_hint,
+        )
+
+    def build_settings_bt_scan_other_view(result: SettingsActionResult, selected_hint: int = 0) -> SettingsViewState:
+        return build_settings_view(
+            view_id="settings_bt_scan_other",
+            title="Other",
+            items=_settings_bluetooth_other_items(result),
             selected_hint=selected_hint,
         )
 
@@ -4140,6 +4188,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                         elif view.view_id == "settings_bluetooth":
                             if action == "bt_scan":
                                 scan_result = run_settings_action("bluetooth_scan", settings_actions.bluetooth_scan)
+                                settings_last_scan_result = scan_result
                                 settings_last_result = scan_result.message
                                 push_settings_view(build_settings_bt_scan_view(scan_result))
                                 current_view = _current_settings_view_name(settings_nav_stack)
@@ -4156,12 +4205,42 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                         elif view.view_id == "settings_bt_scan":
                             if action == "bt_scan":
                                 scan_result = run_settings_action("bluetooth_scan", settings_actions.bluetooth_scan)
+                                settings_last_scan_result = scan_result
                                 settings_last_result = scan_result.message
                                 replace_current_settings_view(
                                     build_settings_bt_scan_view(scan_result, selected_hint=view.selected_idx)
                                 )
                                 should_redraw = True
+                            elif action == "bt_scan_other" and settings_last_scan_result is not None:
+                                push_settings_view(build_settings_bt_scan_other_view(settings_last_scan_result))
+                                current_view = _current_settings_view_name(settings_nav_stack)
+                                should_redraw = True
                             elif action == "bt_pair_connect" and selected_item.address:
+                                pair_result = run_settings_action(
+                                    "bluetooth_pair_connect",
+                                    settings_actions.bluetooth_pair_connect,
+                                    selected_item.address,
+                                )
+                                settings_last_result = pair_result.message
+                                if pair_result.ok:
+                                    set_settings_and_save(
+                                        PersistedSettings(
+                                            audio_output_mode=settings.audio_output_mode,
+                                            music_import_dir=settings.music_import_dir,
+                                            last_connected_bt_address=selected_item.address,
+                                            album_art_mode=settings.album_art_mode,
+                                            now_playing_idle_art=settings.now_playing_idle_art,
+                                            now_playing_progress_ring=settings.now_playing_progress_ring,
+                                        )
+                                    )
+                                    settings_bt_status = run_settings_action(
+                                        "bluetooth_adapter_status",
+                                        settings_actions.bluetooth_adapter_status,
+                                    )
+                                    refresh_settings_root_if_needed()
+                                should_redraw = True
+                        elif view.view_id == "settings_bt_scan_other":
+                            if action == "bt_pair_connect" and selected_item.address:
                                 pair_result = run_settings_action(
                                     "bluetooth_pair_connect",
                                     settings_actions.bluetooth_pair_connect,

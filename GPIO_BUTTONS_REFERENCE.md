@@ -37,7 +37,7 @@ Examples:
 
 PiPod uses BCM numbering by default:
 
-- `MAIN_UP` / `UP` = GPIO `5` (physical pin `29`)
+- `MAIN_UP` / `UP` = GPIO `23` (physical pin `16`)
 - `MAIN_DOWN` / `DOWN` = GPIO `6` (physical pin `31`)
 - `MAIN_LEFT` / `LEFT` = GPIO `12` (physical pin `32`)
 - `MAIN_RIGHT` / `RIGHT` = GPIO `13` (physical pin `33`)
@@ -49,7 +49,7 @@ Equivalent Python mapping:
 
 ```python
 BUTTON_PINS = {
-    "MAIN_UP": 5,
+    "MAIN_UP": 23,
     "MAIN_DOWN": 6,
     "MAIN_LEFT": 12,
     "MAIN_RIGHT": 13,
@@ -76,7 +76,7 @@ When a button is pressed, the GPIO is pulled to ground and an event is generated
 All settings are optional. If unset, defaults are used.
 
 - `PIPOD_GPIO_ENABLED` (default `1`)
-- `PIPOD_GPIO_UP_PIN` (default `5`)
+- `PIPOD_GPIO_UP_PIN` (default `23`)
 - `PIPOD_GPIO_DOWN_PIN` (default `6`)
 - `PIPOD_GPIO_LEFT_PIN` (default `12`)
 - `PIPOD_GPIO_RIGHT_PIN` (default `13`)
@@ -93,7 +93,7 @@ Boolean values accepted: `1/0`, `true/false`, `yes/no`, `on/off` (case-insensiti
 
 ```bash
 export PIPOD_GPIO_ENABLED=1
-export PIPOD_GPIO_UP_PIN=5
+export PIPOD_GPIO_UP_PIN=23
 export PIPOD_GPIO_DOWN_PIN=6
 export PIPOD_GPIO_LEFT_PIN=12
 export PIPOD_GPIO_RIGHT_PIN=13

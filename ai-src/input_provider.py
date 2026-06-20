@@ -39,7 +39,7 @@ def _env_int(name: str, default: int) -> int:
 @dataclass(frozen=True)
 class GpioFiveWayConfig:
     enabled: bool = True
-    up_pin: int = 5
+    up_pin: int = 23
     down_pin: int = 6
     left_pin: int = 12
     right_pin: int = 13
@@ -62,7 +62,7 @@ class GpioFiveWayConfig:
     def from_env(cls) -> "GpioFiveWayConfig":
         return cls(
             enabled=_env_bool("PIPOD_GPIO_ENABLED", True),
-            up_pin=_env_int("PIPOD_GPIO_UP_PIN", 5),
+            up_pin=_env_int("PIPOD_GPIO_UP_PIN", 23),
             down_pin=_env_int("PIPOD_GPIO_DOWN_PIN", 6),
             left_pin=_env_int("PIPOD_GPIO_LEFT_PIN", 12),
             right_pin=_env_int("PIPOD_GPIO_RIGHT_PIN", 13),
