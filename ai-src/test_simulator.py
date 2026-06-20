@@ -1450,6 +1450,35 @@ class SettingsActionsTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.message, "Found 1 named nearby device(s), 2 paired total")
 
+    def test_bluetooth_scan_allows_agent_already_registered(self):
+        actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
+        prep_outputs = {
+            ("power", "on"): "Changing power on succeeded",
+            ("agent", "on"): "Failed to register agent: org.bluez.Error.AlreadyExists",
+            ("default-agent",): "Default agent request successful",
+            ("pairable", "on"): "Changing pairable on succeeded",
+        }
+
+        def fake_run_bt(command):
+            return prep_outputs.get(tuple(command), "ok")
+
+        with (
+            mock.patch("settings_actions.shutil.which", return_value="/usr/bin/bluetoothctl"),
+            mock.patch.object(actions, "_run_bt", side_effect=fake_run_bt),
+            mock.patch.object(
+                actions,
+                "_run_bt_interactive_scan",
+                return_value="[NEW] Device AA:BB:CC:DD:EE:11 Named Headphones",
+            ) as run_scan,
+            mock.patch.object(actions, "_list_devices", return_value=[]),
+            mock.patch.object(actions, "_devices_with_state", return_value=[]),
+        ):
+            result = actions.bluetooth_scan(duration_s=4)
+
+        run_scan.assert_called_once_with(4)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.message, "Found 1 named nearby device(s), 0 paired total")
+
     def test_bluetooth_scan_filters_unnamed_discoveries_but_keeps_paired_devices(self):
         actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
         scan_output = "\n".join(

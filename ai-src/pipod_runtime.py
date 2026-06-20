@@ -2794,7 +2794,7 @@ def render_power_dialog(epd, fonts, base_image: Image.Image, selected_idx: int =
     _, item_font, hint_font = fonts
 
     dialog_w = min(epd.width - 16, 104)
-    dialog_h = 82
+    dialog_h = 72
     x0 = max(4, (epd.width - dialog_w) // 2)
     y0 = max(28, (epd.height - dialog_h) // 2)
     x1 = x0 + dialog_w - 1
@@ -2817,10 +2817,6 @@ def render_power_dialog(epd, fonts, base_image: Image.Image, selected_idx: int =
         else:
             draw.text((x0 + 13, top), label, font=item_font, fill=0)
 
-    hint = "s select  b back"
-    hint_text = ellipsize_text(hint, hint_font, dialog_w - 12)
-    hint_x = x0 + max(6, (dialog_w - measure_text_width(hint_text, hint_font)) // 2)
-    draw.text((hint_x, y1 - 14), hint_text, font=hint_font, fill=0)
     return image
 
 

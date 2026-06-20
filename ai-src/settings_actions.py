@@ -95,7 +95,7 @@ class SettingsActions:
                 prep_output = self._run_bt(command)
                 if prep_output is None:
                     return SettingsActionResult(ok=False, message="Bluetooth unavailable")
-                if self._output_indicates_failure(prep_output):
+                if self._bt_setup_command_failed(command, prep_output):
                     fallback_devices = self._devices_with_state(
                         self._list_devices(command="paired-devices"),
                         paired=True,
@@ -620,3 +620,19 @@ class SettingsActions:
             "not powered",
         )
         return any(marker in lowered for marker in failure_markers)
+
+    @classmethod
+    def _bt_setup_command_failed(cls, command: list[str], output: str) -> bool:
+        command_text = " ".join(str(part).strip().lower() for part in command)
+        lowered = str(output or "").strip().lower()
+        if command_text == "agent on" and any(
+            marker in lowered
+            for marker in (
+                "alreadyexists",
+                "already exists",
+                "already registered",
+                "agent already registered",
+            )
+        ):
+            return False
+        return cls._output_indicates_failure(output)
