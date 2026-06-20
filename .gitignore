@@ -1,7 +1,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.venv/
 data/library.db
 data/settings.json
 ai-src/sim-output/
-

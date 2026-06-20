@@ -38,15 +38,29 @@ from ctypes import *
 logger = logging.getLogger(__name__)
 
 
+def _env_pin(name, default):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"", "none", "off", "disabled", "disable", "-1"}:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning("Ignoring invalid %s=%r; using %r", name, raw, default)
+        return default
+
+
 class RaspberryPi:
     # Pin definition
-    RST_PIN  = 17
-    DC_PIN   = 25
-    CS_PIN   = 8
-    BUSY_PIN = 24
-    PWR_PIN  = 18
-    MOSI_PIN = 10
-    SCLK_PIN = 11
+    RST_PIN  = _env_pin("PIPOD_EPD_RST_PIN", 17)
+    DC_PIN   = _env_pin("PIPOD_EPD_DC_PIN", 25)
+    CS_PIN   = _env_pin("PIPOD_EPD_CS_PIN", 8)
+    BUSY_PIN = _env_pin("PIPOD_EPD_BUSY_PIN", 24)
+    PWR_PIN  = _env_pin("PIPOD_EPD_PWR_PIN", 18)
+    MOSI_PIN = _env_pin("PIPOD_EPD_MOSI_PIN", 10)
+    SCLK_PIN = _env_pin("PIPOD_EPD_SCLK_PIN", 11)
 
     def __init__(self):
         import spidev
@@ -56,7 +70,7 @@ class RaspberryPi:
         self.GPIO_RST_PIN    = gpiozero.LED(self.RST_PIN)
         self.GPIO_DC_PIN     = gpiozero.LED(self.DC_PIN)
         # self.GPIO_CS_PIN     = gpiozero.LED(self.CS_PIN)
-        self.GPIO_PWR_PIN    = gpiozero.LED(self.PWR_PIN)
+        self.GPIO_PWR_PIN    = gpiozero.LED(self.PWR_PIN) if self.PWR_PIN is not None else None
         self.GPIO_BUSY_PIN   = gpiozero.Button(self.BUSY_PIN, pull_up = False)
 
         
@@ -78,6 +92,8 @@ class RaspberryPi:
         #     else:
         #         self.GPIO_CS_PIN.off()
         elif pin == self.PWR_PIN:
+            if self.GPIO_PWR_PIN is None:
+                return
             if value:
                 self.GPIO_PWR_PIN.on()
             else:
@@ -93,7 +109,9 @@ class RaspberryPi:
         # elif pin == self.CS_PIN:
         #     return self.CS_PIN.value
         elif pin == self.PWR_PIN:
-            return self.PWR_PIN.value
+            if self.GPIO_PWR_PIN is None:
+                return 1
+            return self.GPIO_PWR_PIN.value
 
     def delay_ms(self, delaytime):
         time.sleep(delaytime / 1000.0)
@@ -114,7 +132,8 @@ class RaspberryPi:
         return self.DEV_SPI.DEV_SPI_ReadData()
 
     def module_init(self, cleanup=False):
-        self.GPIO_PWR_PIN.on()
+        if self.GPIO_PWR_PIN is not None:
+            self.GPIO_PWR_PIN.on()
         
         if cleanup:
             find_dirs = [
@@ -140,7 +159,10 @@ class RaspberryPi:
 
         else:
             # SPI device, bus = 0, device = 0
-            self.SPI.open(0, 0)
+            self.SPI.open(
+                int(os.getenv("PIPOD_EPD_SPI_BUS", "0")),
+                int(os.getenv("PIPOD_EPD_SPI_DEVICE", "0")),
+            )
             self.SPI.max_speed_hz = 4000000
             self.SPI.mode = 0b00
         return 0
@@ -151,14 +173,16 @@ class RaspberryPi:
 
         self.GPIO_RST_PIN.off()
         self.GPIO_DC_PIN.off()
-        self.GPIO_PWR_PIN.off()
+        if self.GPIO_PWR_PIN is not None:
+            self.GPIO_PWR_PIN.off()
         logger.debug("close 5V, Module enters 0 power consumption ...")
         
         if cleanup:
             self.GPIO_RST_PIN.close()
             self.GPIO_DC_PIN.close()
             # self.GPIO_CS_PIN.close()
-            self.GPIO_PWR_PIN.close()
+            if self.GPIO_PWR_PIN is not None:
+                self.GPIO_PWR_PIN.close()
             self.GPIO_BUSY_PIN.close()
 
         

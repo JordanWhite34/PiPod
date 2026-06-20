@@ -39,11 +39,13 @@ def _env_int(name: str, default: int) -> int:
 @dataclass(frozen=True)
 class GpioFiveWayConfig:
     enabled: bool = True
-    up_pin: int = 6
-    down_pin: int = 19
-    left_pin: int = 5
-    right_pin: int = 26
-    select_pin: int = 13
+    up_pin: int = 5
+    down_pin: int = 6
+    left_pin: int = 12
+    right_pin: int = 13
+    select_pin: int = 19
+    vol_up_pin: int | None = 20
+    vol_down_pin: int | None = 21
     debounce_ms: int = 70
     pull_up: bool = True
 
@@ -55,11 +57,13 @@ class GpioFiveWayConfig:
     def from_env(cls) -> "GpioFiveWayConfig":
         return cls(
             enabled=_env_bool("PIPOD_GPIO_ENABLED", True),
-            up_pin=_env_int("PIPOD_GPIO_UP_PIN", 6),
-            down_pin=_env_int("PIPOD_GPIO_DOWN_PIN", 19),
-            left_pin=_env_int("PIPOD_GPIO_LEFT_PIN", 5),
-            right_pin=_env_int("PIPOD_GPIO_RIGHT_PIN", 26),
-            select_pin=_env_int("PIPOD_GPIO_SELECT_PIN", 13),
+            up_pin=_env_int("PIPOD_GPIO_UP_PIN", 5),
+            down_pin=_env_int("PIPOD_GPIO_DOWN_PIN", 6),
+            left_pin=_env_int("PIPOD_GPIO_LEFT_PIN", 12),
+            right_pin=_env_int("PIPOD_GPIO_RIGHT_PIN", 13),
+            select_pin=_env_int("PIPOD_GPIO_SELECT_PIN", 19),
+            vol_up_pin=_env_int("PIPOD_GPIO_VOL_UP_PIN", 20),
+            vol_down_pin=_env_int("PIPOD_GPIO_VOL_DOWN_PIN", 21),
             debounce_ms=_env_int("PIPOD_GPIO_DEBOUNCE_MS", 70),
             pull_up=_env_bool("PIPOD_GPIO_PULL_UP", True),
         )
@@ -89,6 +93,11 @@ class GpioFiveWayInput:
             ("RIGHT", config.right_pin),
             ("SELECT", config.select_pin),
         )
+        if config.vol_up_pin is not None:
+            pin_map = (*pin_map, ("VOL_UP", config.vol_up_pin))
+        if config.vol_down_pin is not None:
+            pin_map = (*pin_map, ("VOL_DOWN", config.vol_down_pin))
+
         for event_name, pin in pin_map:
             button = button_factory(
                 pin=int(pin),

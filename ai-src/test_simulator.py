@@ -545,18 +545,35 @@ class GpioInputProviderTests(unittest.TestCase):
                 "PIPOD_GPIO_LEFT_PIN": "",
                 "PIPOD_GPIO_RIGHT_PIN": "",
                 "PIPOD_GPIO_SELECT_PIN": "",
+                "PIPOD_GPIO_VOL_UP_PIN": "",
+                "PIPOD_GPIO_VOL_DOWN_PIN": "",
                 "PIPOD_GPIO_DEBOUNCE_MS": "",
                 "PIPOD_GPIO_PULL_UP": "",
             },
         ):
             config = GpioFiveWayConfig.from_env()
-        self.assertEqual(config.up_pin, 6)
-        self.assertEqual(config.down_pin, 19)
-        self.assertEqual(config.left_pin, 5)
-        self.assertEqual(config.right_pin, 26)
-        self.assertEqual(config.select_pin, 13)
+        self.assertEqual(config.up_pin, 5)
+        self.assertEqual(config.down_pin, 6)
+        self.assertEqual(config.left_pin, 12)
+        self.assertEqual(config.right_pin, 13)
+        self.assertEqual(config.select_pin, 19)
+        self.assertEqual(config.vol_up_pin, 20)
+        self.assertEqual(config.vol_down_pin, 21)
         self.assertEqual(config.debounce_ms, 70)
         self.assertTrue(config.pull_up)
+
+    def test_gpio_five_way_config_from_env_supports_volume_pins(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "PIPOD_GPIO_VOL_UP_PIN": "22",
+                "PIPOD_GPIO_VOL_DOWN_PIN": "23",
+            },
+        ):
+            config = GpioFiveWayConfig.from_env()
+
+        self.assertEqual(config.vol_up_pin, 22)
+        self.assertEqual(config.vol_down_pin, 23)
 
     def test_gpio_input_enqueues_events_and_closes_buttons(self):
         created: list[FakeButton] = []
@@ -568,11 +585,13 @@ class GpioInputProviderTests(unittest.TestCase):
 
         config = GpioFiveWayConfig(
             enabled=True,
-            up_pin=6,
-            down_pin=19,
-            left_pin=5,
-            right_pin=26,
-            select_pin=13,
+            up_pin=5,
+            down_pin=6,
+            left_pin=12,
+            right_pin=13,
+            select_pin=19,
+            vol_up_pin=20,
+            vol_down_pin=21,
             debounce_ms=70,
             pull_up=True,
         )
@@ -585,8 +604,8 @@ class GpioInputProviderTests(unittest.TestCase):
         for button in created:
             button.press()
         self.assertEqual(
-            [gpio_input.poll_nonblocking() for _ in range(5)],
-            ["UP", "DOWN", "LEFT", "RIGHT", "SELECT"],
+            [gpio_input.poll_nonblocking() for _ in range(7)],
+            ["UP", "DOWN", "LEFT", "RIGHT", "SELECT", "VOL_UP", "VOL_DOWN"],
         )
         self.assertIsNone(gpio_input.poll_nonblocking())
 

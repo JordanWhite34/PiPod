@@ -43,6 +43,29 @@ If your DAC is wired as:
 - `GND` -> `GND`
 - `SCK` unused
 
+Important GPIO conflicts with the default PiPod wiring:
+- I2S `BCK` uses `GPIO18`. The Waveshare display driver also defaults its optional `PWR` control line to `GPIO18`.
+- I2S `LCK/LRCK` uses `GPIO19`. The default `MAIN_CENTER` button also uses `GPIO19`.
+- I2S `DIN` uses `GPIO21`. The default `VOL_DOWN` button also uses `GPIO21`.
+
+For I2S audio and e-paper at the same time, do one of these before launching PiPod:
+
+```bash
+# If the display PWR pin is not connected and the panel is powered directly:
+export PIPOD_EPD_PWR_PIN=none
+
+# Or, if you rewired the display PWR line to another BCM pin:
+export PIPOD_EPD_PWR_PIN=22
+```
+
+If you use the default GPIO buttons with I2S audio, also move the conflicting
+buttons to free BCM pins:
+
+```bash
+export PIPOD_GPIO_SELECT_PIN=16
+export PIPOD_GPIO_VOL_DOWN_PIN=26
+```
+
 Run the setup script on the Pi:
 
 ```bash
@@ -76,6 +99,33 @@ If pygame still fails to open audio, force ALSA explicitly:
 ```bash
 export PIPOD_SDL_AUDIODRIVER=alsa
 python3 ai-src/app.py
+```
+
+### E-Paper Display Smoke Test
+
+If the e-paper display is blank, run a direct panel test on the Pi:
+
+```bash
+python3 scripts/epd_smoke_test.py --leave-on
+```
+
+To actively manipulate the panel through multiple full and partial refresh
+patterns:
+
+```bash
+python3 scripts/epd_smoke_test.py --sequence all --hold-seconds 1 --leave-on
+```
+
+If `GPIO18` is being used by the I2S DAC and the display is powered directly, run:
+
+```bash
+PIPOD_EPD_PWR_PIN=none python3 scripts/epd_smoke_test.py --leave-on
+```
+
+If you rewired the display `PWR` line to another BCM pin, pass that pin:
+
+```bash
+PIPOD_EPD_PWR_PIN=22 python3 scripts/epd_smoke_test.py --leave-on
 ```
 
 Music library folder:

@@ -11,8 +11,10 @@ This GPIO input path handles only navigation:
 - `LEFT`
 - `RIGHT`
 - `SELECT` (center click)
+- Optional `VOL_UP`
+- Optional `VOL_DOWN`
 
-`VOLUME` and `POWER` are separate hardware buttons and are not part of this 5-way GPIO input module.
+`POWER` is separate hardware handling and is not part of this GPIO input module.
 
 ## Navigation Behavior
 
@@ -32,11 +34,31 @@ Examples:
 
 PiPod uses BCM numbering by default:
 
-- `UP` = GPIO `6`
-- `DOWN` = GPIO `19`
-- `LEFT` = GPIO `5`
-- `RIGHT` = GPIO `26`
-- `SELECT` = GPIO `13`
+- `MAIN_UP` / `UP` = GPIO `5`
+- `MAIN_DOWN` / `DOWN` = GPIO `6`
+- `MAIN_LEFT` / `LEFT` = GPIO `12`
+- `MAIN_RIGHT` / `RIGHT` = GPIO `13`
+- `MAIN_CENTER` / `SELECT` = GPIO `19`
+- `VOL_UP` = GPIO `20`
+- `VOL_DOWN` = GPIO `21`
+
+Equivalent Python mapping:
+
+```python
+BUTTON_PINS = {
+    "MAIN_UP": 5,
+    "MAIN_DOWN": 6,
+    "MAIN_LEFT": 12,
+    "MAIN_RIGHT": 13,
+    "MAIN_CENTER": 19,
+    "VOL_UP": 20,
+    "VOL_DOWN": 21,
+}
+```
+
+If I2S audio is enabled with the DAC wiring in the README, note that I2S uses
+GPIO `19` for `LRCK` and GPIO `21` for `DIN`. Those conflict with
+`MAIN_CENTER` and `VOL_DOWN` in this button map.
 
 ## Wiring Assumptions
 
@@ -52,11 +74,13 @@ When a button is pressed, the GPIO is pulled to ground and an event is generated
 All settings are optional. If unset, defaults are used.
 
 - `PIPOD_GPIO_ENABLED` (default `1`)
-- `PIPOD_GPIO_UP_PIN` (default `6`)
-- `PIPOD_GPIO_DOWN_PIN` (default `19`)
-- `PIPOD_GPIO_LEFT_PIN` (default `5`)
-- `PIPOD_GPIO_RIGHT_PIN` (default `26`)
-- `PIPOD_GPIO_SELECT_PIN` (default `13`)
+- `PIPOD_GPIO_UP_PIN` (default `5`)
+- `PIPOD_GPIO_DOWN_PIN` (default `6`)
+- `PIPOD_GPIO_LEFT_PIN` (default `12`)
+- `PIPOD_GPIO_RIGHT_PIN` (default `13`)
+- `PIPOD_GPIO_SELECT_PIN` (default `19`)
+- `PIPOD_GPIO_VOL_UP_PIN` (default `20`)
+- `PIPOD_GPIO_VOL_DOWN_PIN` (default `21`)
 - `PIPOD_GPIO_DEBOUNCE_MS` (default `70`)
 - `PIPOD_GPIO_PULL_UP` (default `1`)
 
@@ -66,14 +90,21 @@ Boolean values accepted: `1/0`, `true/false`, `yes/no`, `on/off` (case-insensiti
 
 ```bash
 export PIPOD_GPIO_ENABLED=1
-export PIPOD_GPIO_UP_PIN=6
-export PIPOD_GPIO_DOWN_PIN=19
-export PIPOD_GPIO_LEFT_PIN=5
-export PIPOD_GPIO_RIGHT_PIN=26
-export PIPOD_GPIO_SELECT_PIN=13
+export PIPOD_GPIO_UP_PIN=5
+export PIPOD_GPIO_DOWN_PIN=6
+export PIPOD_GPIO_LEFT_PIN=12
+export PIPOD_GPIO_RIGHT_PIN=13
+export PIPOD_GPIO_SELECT_PIN=19
+export PIPOD_GPIO_VOL_UP_PIN=20
+export PIPOD_GPIO_VOL_DOWN_PIN=21
 export PIPOD_GPIO_DEBOUNCE_MS=70
 export PIPOD_GPIO_PULL_UP=1
 ```
+
+## Volume Buttons
+
+Volume buttons use the same active-low GPIO handling as the main controls.
+They emit `VOL_UP` and `VOL_DOWN` runtime events.
 
 ## Runtime Behavior and Fallback
 
@@ -85,13 +116,13 @@ export PIPOD_GPIO_PULL_UP=1
 export PIPOD_GPIO_ENABLED=0
 ```
 
-## Volume and Power Buttons
+## Power Button
 
-Volume and power are intentionally separate from this 5-way navigation path.
+Power is intentionally separate from this input path.
 
-- They should use their own dedicated hardware handling.
-- They are not configured by the `PIPOD_GPIO_*` variables above.
-- They do not emit navigation events in this module.
+- It should use its own dedicated hardware handling.
+- It is not configured by the `PIPOD_GPIO_*` variables above.
+- It does not emit navigation events in this module.
 
 ## Implementation Files
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 
 from pathlib import Path
@@ -30,7 +31,7 @@ LIB_DIR = ROOT_DIR / "lib"
 if LIB_DIR.exists():
     sys.path.insert(0, str(LIB_DIR))
 
-from waveshare_epd import epd2in13_V4
+from waveshare_epd import epd2in13_V4, epdconfig
 
 logging.basicConfig(level=logging.INFO)
 
@@ -63,18 +64,30 @@ def main():
                 combined_input = CombinedEventProvider(read_key_event, gpio_input=gpio_input)
                 event_provider = combined_input
                 logging.info(
-                    "GPIO input enabled (BCM: up=%d down=%d left=%d right=%d select=%d, debounce=%dms, pull_up=%s)",
+                    "GPIO input enabled (BCM: up=%d down=%d left=%d right=%d select=%d vol_up=%s vol_down=%s, debounce=%dms, pull_up=%s)",
                     gpio_config.up_pin,
                     gpio_config.down_pin,
                     gpio_config.left_pin,
                     gpio_config.right_pin,
                     gpio_config.select_pin,
+                    gpio_config.vol_up_pin,
+                    gpio_config.vol_down_pin,
                     gpio_config.debounce_ms,
                     gpio_config.pull_up,
                 )
         else:
             logging.info("GPIO input disabled by PIPOD_GPIO_ENABLED=0; keyboard only")
 
+        logging.info(
+            "EPD pins (BCM): rst=%s dc=%s cs=%s busy=%s pwr=%s spi=%s.%s",
+            epdconfig.RST_PIN,
+            epdconfig.DC_PIN,
+            epdconfig.CS_PIN,
+            epdconfig.BUSY_PIN,
+            epdconfig.PWR_PIN,
+            os.getenv("PIPOD_EPD_SPI_BUS", "0"),
+            os.getenv("PIPOD_EPD_SPI_DEVICE", "0"),
+        )
         epd = epd2in13_V4.EPD()
 
         config = RunConfig(
