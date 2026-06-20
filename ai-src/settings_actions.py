@@ -125,18 +125,21 @@ class SettingsActions:
                 details={"devices": fallback_devices},
             )
 
-        discovered_devices = self._parse_scan_discoveries(scan_output)
+        raw_discovered_devices = self._parse_scan_discoveries(scan_output)
+        discovered_devices = self._named_scan_devices(raw_discovered_devices)
         paired_devices = self._list_devices(command="paired-devices")
         merged_devices = self._merge_devices(discovered_devices, paired_devices)
         devices = self._devices_with_state(merged_devices)
         nearby_count = len({address for address, _ in discovered_devices})
+        raw_nearby_count = len({address for address, _ in raw_discovered_devices})
         paired_count = len({address for address, _ in paired_devices})
         return SettingsActionResult(
             ok=True,
-            message=f"Found {nearby_count} nearby device(s), {paired_count} paired total",
+            message=f"Found {nearby_count} named nearby device(s), {paired_count} paired total",
             details={
                 "devices": devices,
                 "nearby_count": nearby_count,
+                "raw_nearby_count": raw_nearby_count,
                 "paired_count": paired_count,
             },
         )
@@ -156,25 +159,77 @@ class SettingsActions:
         address = str(address).strip().upper()
         if not address:
             return SettingsActionResult(ok=False, message="Bluetooth address required")
+        if shutil.which("bluetoothctl") is None:
+            return SettingsActionResult(ok=False, message="Bluetooth unavailable: bluetoothctl missing")
 
-        pair_output = self._run_bt(["pair", address]) or ""
-        trust_output = self._run_bt(["trust", address]) or ""
-        connect_output = self._run_bt(["connect", address]) or ""
-        ok = self._command_succeeded(pair_output) and self._command_succeeded(connect_output)
-        message = "Paired and connected" if ok else "Pair/connect failed"
+        session_output = self._run_bt_session(
+            [
+                "power on",
+                "agent on",
+                "default-agent",
+                "pairable on",
+                f"pair {address}",
+                f"trust {address}",
+                f"connect {address}",
+            ],
+            timeout=45,
+        )
+        if session_output is None:
+            return SettingsActionResult(ok=False, message="Bluetooth unavailable")
+
+        info_output = self._run_bt(["info", address]) or ""
+        paired = self._parse_bt_flag(info_output, "Paired")
+        connected = self._parse_bt_flag(info_output, "Connected")
+        trusted = self._parse_bt_flag(info_output, "Trusted")
+        pair_ok = paired or self._pair_succeeded(session_output)
+        connect_ok = connected or self._connect_succeeded(session_output)
+        ok = pair_ok and connect_ok
+
+        if ok and paired:
+            message = "Connected headphones"
+        elif ok:
+            message = "Paired and connected"
+        elif pair_ok:
+            message = "Paired; connect failed"
+        else:
+            message = "Pair/connect failed"
         return SettingsActionResult(
             ok=ok,
             message=message,
             details={
                 "address": address,
-                "pair_output": pair_output,
-                "trust_output": trust_output,
-                "connect_output": connect_output,
+                "paired": paired,
+                "connected": connected,
+                "trusted": trusted,
+                "output": session_output,
+                "info_output": info_output,
             },
         )
 
     def bluetooth_connect(self, address: str) -> SettingsActionResult:
-        return self._single_bt_action(["connect", address], success_message="Connected")
+        address = str(address).strip().upper()
+        if not address:
+            return SettingsActionResult(ok=False, message="Bluetooth address required")
+        if shutil.which("bluetoothctl") is None:
+            return SettingsActionResult(ok=False, message="Bluetooth unavailable: bluetoothctl missing")
+
+        session_output = self._run_bt_session(["power on", f"connect {address}"], timeout=25)
+        if session_output is None:
+            return SettingsActionResult(ok=False, message="Bluetooth unavailable")
+
+        info_output = self._run_bt(["info", address]) or ""
+        connected = self._parse_bt_flag(info_output, "Connected")
+        ok = connected or self._connect_succeeded(session_output)
+        return SettingsActionResult(
+            ok=ok,
+            message="Connected" if ok else "Connect failed",
+            details={
+                "address": address,
+                "connected": connected,
+                "output": session_output,
+                "info_output": info_output,
+            },
+        )
 
     def bluetooth_disconnect(self, address: str) -> SettingsActionResult:
         return self._single_bt_action(["disconnect", address], success_message="Disconnected")
@@ -343,6 +398,29 @@ class SettingsActions:
                 except subprocess.TimeoutExpired:
                     proc.kill()
 
+    def _run_bt_session(self, commands: list[str], timeout: int = 30) -> str | None:
+        try:
+            script = "\n".join([*commands, "quit", ""])
+            proc = subprocess.run(
+                ["bluetoothctl"],
+                input=script,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=max(1, int(timeout)),
+            )
+        except FileNotFoundError:
+            return None
+        except subprocess.TimeoutExpired as exc:
+            partial_stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else str(exc.stdout or "")
+            partial_stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else str(exc.stderr or "")
+            logging.warning("bluetoothctl session timed out for %s", commands)
+            return f"{partial_stdout}\n{partial_stderr}".strip()
+        except Exception as exc:
+            logging.warning("bluetoothctl session %s failed: %s", commands, exc)
+            return ""
+        return f"{proc.stdout}\n{proc.stderr}".strip()
+
     @staticmethod
     def _parse_scan_discoveries(output: str) -> list[tuple[str, str]]:
         devices: dict[str, str] = {}
@@ -405,6 +483,26 @@ class SettingsActions:
         add(secondary, prefer_existing=False)
         return [(address, merged[address]) for address in order]
 
+    @classmethod
+    def _named_scan_devices(cls, devices: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
+        return [
+            (address, name)
+            for address, name in devices
+            if cls._is_useful_scan_name(address, name)
+        ]
+
+    @staticmethod
+    def _is_useful_scan_name(address: str, name: str) -> bool:
+        normalized_address = str(address or "").strip().upper()
+        normalized_name = str(name or "").strip()
+        if not normalized_name:
+            return False
+        if normalized_name.upper() == normalized_address:
+            return False
+        if normalized_name.lower() in {"unknown", "unknown device", "(unknown)", "n/a", "none"}:
+            return False
+        return any(char.isalpha() for char in normalized_name)
+
     @staticmethod
     def _parse_bt_flag(output: str, key: str) -> bool:
         for line in output.splitlines():
@@ -453,6 +551,15 @@ class SettingsActions:
         lowered = str(output or "").strip().lower()
         if not lowered:
             return False
+        benign_markers = (
+            "alreadyexists",
+            "already exists",
+            "already paired",
+            "already connected",
+            "not connected",
+        )
+        if any(marker in lowered for marker in benign_markers):
+            return True
         if "not available" in lowered or "failed" in lowered or "error" in lowered:
             return False
         success_markers = (
@@ -466,6 +573,38 @@ class SettingsActions:
             "changing",
         )
         return any(marker in lowered for marker in success_markers)
+
+    @staticmethod
+    def _pair_succeeded(output: str) -> bool:
+        lowered = str(output or "").strip().lower()
+        if not lowered:
+            return False
+        return any(
+            marker in lowered
+            for marker in (
+                "pairing successful",
+                "pairing succeeded",
+                "alreadyexists",
+                "already exists",
+                "already paired",
+            )
+        )
+
+    @staticmethod
+    def _connect_succeeded(output: str) -> bool:
+        lowered = str(output or "").strip().lower()
+        if not lowered:
+            return False
+        return any(
+            marker in lowered
+            for marker in (
+                "connection successful",
+                "connect successful",
+                "connected: yes",
+                "already connected",
+                "alreadyconnected",
+            )
+        )
 
     @staticmethod
     def _output_indicates_failure(output: str) -> bool:

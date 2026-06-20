@@ -165,15 +165,24 @@ Runtime menu:
 Controls:
 - `u` / `d` move selection
 - `s` or `right` select
+- `hold` / `select_hold` open the Sleep / Power Off dialog in the simulator
 - `b` or `left` go back
 - `t` toggle album art render mode (Now Playing)
 - `q` quit
 
+Power dialog:
+- `Sleep` blanks/sleeps the e-paper display while music continues playing; click
+  center/select to wake.
+- `Power Off` is an app soft-off: playback stops, the display blanks/sleeps,
+  and normal controls are ignored until center/select is held again.
+
 Bluetooth scan and pairing (Pi Zero 2 W):
-- Menu path: `Settings > Bluetooth > Scan & Pair Headphones`
+- Menu path: `Settings > Bluetooth > Scan for Headphones`
 - PiPod runs a real BlueZ scan session via `bluetoothctl` (not simulator fixtures)
 - Before each scan, PiPod prepares adapter state with: `power on`, `agent on`, `default-agent`, `pairable on`
-- Scan results show nearby discoveries from the active scan window plus paired devices not currently nearby
+- Scan results hide address-only, numeric-only, and unknown-name discoveries, then add paired devices even when they are not currently nearby
+- Selecting a device runs `power on`, `agent on`, `default-agent`, `pairable on`, `pair`, `trust`, and `connect` in one `bluetoothctl` session
+- Already-paired or already-connected headphones are treated as usable successes when BlueZ reports the final device state as connected
 - If scanning times out or fails, PiPod returns a safe fallback list of paired devices
 - Requirement: `bluetoothctl` must be installed and the Bluetooth service running on the Pi
 

@@ -47,11 +47,16 @@ class GpioFiveWayConfig:
     vol_up_pin: int | None = 20
     vol_down_pin: int | None = 21
     debounce_ms: int = 70
+    select_hold_ms: int = 1200
     pull_up: bool = True
 
     @property
     def bounce_time_s(self) -> float:
         return max(0.0, float(self.debounce_ms) / 1000.0)
+
+    @property
+    def select_hold_time_s(self) -> float:
+        return max(0.1, float(self.select_hold_ms) / 1000.0)
 
     @classmethod
     def from_env(cls) -> "GpioFiveWayConfig":
@@ -65,6 +70,7 @@ class GpioFiveWayConfig:
             vol_up_pin=_env_int("PIPOD_GPIO_VOL_UP_PIN", 20),
             vol_down_pin=_env_int("PIPOD_GPIO_VOL_DOWN_PIN", 21),
             debounce_ms=_env_int("PIPOD_GPIO_DEBOUNCE_MS", 70),
+            select_hold_ms=_env_int("PIPOD_GPIO_SELECT_HOLD_MS", 1200),
             pull_up=_env_bool("PIPOD_GPIO_PULL_UP", True),
         )
 
@@ -80,6 +86,7 @@ class GpioFiveWayInput:
         self.config = config
         self._queue: deque[str] = deque()
         self._buttons: list[object] = []
+        self._select_held = False
 
         if button_factory is None:
             if Button is None:
@@ -91,14 +98,35 @@ class GpioFiveWayInput:
             ("DOWN", config.down_pin),
             ("LEFT", config.left_pin),
             ("RIGHT", config.right_pin),
-            ("SELECT", config.select_pin),
         )
-        if config.vol_up_pin is not None:
-            pin_map = (*pin_map, ("VOL_UP", config.vol_up_pin))
-        if config.vol_down_pin is not None:
-            pin_map = (*pin_map, ("VOL_DOWN", config.vol_down_pin))
 
         for event_name, pin in pin_map:
+            button = button_factory(
+                pin=int(pin),
+                pull_up=bool(config.pull_up),
+                bounce_time=config.bounce_time_s,
+            )
+            setattr(button, "when_pressed", self._queue_event(event_name))
+            self._buttons.append(button)
+
+        select_button = button_factory(
+            pin=int(config.select_pin),
+            pull_up=bool(config.pull_up),
+            bounce_time=config.bounce_time_s,
+            hold_time=config.select_hold_time_s,
+            hold_repeat=False,
+        )
+        setattr(select_button, "when_held", self._queue_select_hold_event())
+        setattr(select_button, "when_released", self._queue_select_release_event())
+        self._buttons.append(select_button)
+
+        volume_pin_map = ()
+        if config.vol_up_pin is not None:
+            volume_pin_map = (*volume_pin_map, ("VOL_UP", config.vol_up_pin))
+        if config.vol_down_pin is not None:
+            volume_pin_map = (*volume_pin_map, ("VOL_DOWN", config.vol_down_pin))
+
+        for event_name, pin in volume_pin_map:
             button = button_factory(
                 pin=int(pin),
                 pull_up=bool(config.pull_up),
@@ -113,6 +141,22 @@ class GpioFiveWayInput:
 
         return _handler
 
+    def _queue_select_hold_event(self) -> Callable[[], None]:
+        def _handler():
+            self._select_held = True
+            self._queue.append("SELECT_HOLD")
+
+        return _handler
+
+    def _queue_select_release_event(self) -> Callable[[], None]:
+        def _handler():
+            if self._select_held:
+                self._select_held = False
+                return
+            self._queue.append("SELECT")
+
+        return _handler
+
     def poll_nonblocking(self) -> str | None:
         if not self._queue:
             return None
@@ -122,6 +166,8 @@ class GpioFiveWayInput:
         for button in self._buttons:
             try:
                 setattr(button, "when_pressed", None)
+                setattr(button, "when_held", None)
+                setattr(button, "when_released", None)
             except Exception:
                 pass
             close = getattr(button, "close", None)
@@ -132,6 +178,7 @@ class GpioFiveWayInput:
                     pass
         self._buttons.clear()
         self._queue.clear()
+        self._select_held = False
 
 
 class CombinedEventProvider:

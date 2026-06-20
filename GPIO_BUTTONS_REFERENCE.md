@@ -11,10 +11,12 @@ This GPIO input path handles only navigation:
 - `LEFT`
 - `RIGHT`
 - `SELECT` (center click)
+- `SELECT_HOLD` (center hold)
 - Optional `VOL_UP`
 - Optional `VOL_DOWN`
 
-`POWER` is separate hardware handling and is not part of this GPIO input module.
+The center/select hold opens PiPod's soft-power dialog. It is app-level power
+handling, not a dedicated physical power switch.
 
 ## Navigation Behavior
 
@@ -23,6 +25,7 @@ App-wide behavior is:
 - `LEFT` => Back (`BACK`)
 - `RIGHT` => Select/activate (`SELECT`)
 - `SELECT` => Select/activate
+- `SELECT_HOLD` => Open the Sleep / Power Off dialog
 - `UP` / `DOWN` => Move focus/selection
 
 Examples:
@@ -82,6 +85,7 @@ All settings are optional. If unset, defaults are used.
 - `PIPOD_GPIO_VOL_UP_PIN` (default `20`)
 - `PIPOD_GPIO_VOL_DOWN_PIN` (default `21`)
 - `PIPOD_GPIO_DEBOUNCE_MS` (default `70`)
+- `PIPOD_GPIO_SELECT_HOLD_MS` (default `1200`)
 - `PIPOD_GPIO_PULL_UP` (default `1`)
 
 Boolean values accepted: `1/0`, `true/false`, `yes/no`, `on/off` (case-insensitive).
@@ -98,6 +102,7 @@ export PIPOD_GPIO_SELECT_PIN=19
 export PIPOD_GPIO_VOL_UP_PIN=20
 export PIPOD_GPIO_VOL_DOWN_PIN=21
 export PIPOD_GPIO_DEBOUNCE_MS=70
+export PIPOD_GPIO_SELECT_HOLD_MS=1200
 export PIPOD_GPIO_PULL_UP=1
 ```
 
@@ -116,13 +121,18 @@ They emit `VOL_UP` and `VOL_DOWN` runtime events.
 export PIPOD_GPIO_ENABLED=0
 ```
 
-## Power Button
+## Soft Power
 
-Power is intentionally separate from this input path.
+Holding the center/select button emits `SELECT_HOLD` and opens a power dialog:
 
-- It should use its own dedicated hardware handling.
-- It is not configured by the `PIPOD_GPIO_*` variables above.
-- It does not emit navigation events in this module.
+- `Sleep` blanks and sleeps the e-paper display while music keeps playing.
+- `Power Off` is a soft-off state: playback stops, the display blanks/sleeps,
+  and the app ignores normal controls while it keeps running.
+- A center click wakes from sleep.
+- A center hold wakes from soft-off.
+
+This does not cut battery power to the Raspberry Pi. It is intentionally a
+software state so the same center/select button can wake the app again.
 
 ## Implementation Files
 

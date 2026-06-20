@@ -64,7 +64,7 @@ def main():
                 combined_input = CombinedEventProvider(read_key_event, gpio_input=gpio_input)
                 event_provider = combined_input
                 logging.info(
-                    "GPIO input enabled (BCM: up=%d down=%d left=%d right=%d select=%d vol_up=%s vol_down=%s, debounce=%dms, pull_up=%s)",
+                    "GPIO input enabled (BCM: up=%d down=%d left=%d right=%d select=%d vol_up=%s vol_down=%s, debounce=%dms, select_hold=%dms, pull_up=%s)",
                     gpio_config.up_pin,
                     gpio_config.down_pin,
                     gpio_config.left_pin,
@@ -73,6 +73,7 @@ def main():
                     gpio_config.vol_up_pin,
                     gpio_config.vol_down_pin,
                     gpio_config.debounce_ms,
+                    gpio_config.select_hold_ms,
                     gpio_config.pull_up,
                 )
         else:

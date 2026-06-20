@@ -517,18 +517,41 @@ class InputParsingTests(unittest.TestCase):
         self.assertEqual(parse_input_token("s"), "SELECT")
         self.assertEqual(parse_input_token("b"), "BACK")
 
+    def test_parse_input_token_supports_select_hold(self):
+        self.assertEqual(parse_input_token("hold"), "SELECT_HOLD")
+        self.assertEqual(parse_input_token("select_hold"), "SELECT_HOLD")
+
 
 class FakeButton:
-    def __init__(self, pin: int, pull_up: bool, bounce_time: float):
+    def __init__(
+        self,
+        pin: int,
+        pull_up: bool,
+        bounce_time: float,
+        hold_time: float | None = None,
+        hold_repeat: bool | None = None,
+    ):
         self.pin = pin
         self.pull_up = pull_up
         self.bounce_time = bounce_time
+        self.hold_time = hold_time
+        self.hold_repeat = hold_repeat
         self.when_pressed = None
+        self.when_released = None
+        self.when_held = None
         self.closed = False
 
     def press(self):
         if callable(self.when_pressed):
             self.when_pressed()
+
+    def release(self):
+        if callable(self.when_released):
+            self.when_released()
+
+    def hold(self):
+        if callable(self.when_held):
+            self.when_held()
 
     def close(self):
         self.closed = True
@@ -548,6 +571,7 @@ class GpioInputProviderTests(unittest.TestCase):
                 "PIPOD_GPIO_VOL_UP_PIN": "",
                 "PIPOD_GPIO_VOL_DOWN_PIN": "",
                 "PIPOD_GPIO_DEBOUNCE_MS": "",
+                "PIPOD_GPIO_SELECT_HOLD_MS": "",
                 "PIPOD_GPIO_PULL_UP": "",
             },
         ):
@@ -560,26 +584,42 @@ class GpioInputProviderTests(unittest.TestCase):
         self.assertEqual(config.vol_up_pin, 20)
         self.assertEqual(config.vol_down_pin, 21)
         self.assertEqual(config.debounce_ms, 70)
+        self.assertEqual(config.select_hold_ms, 1200)
         self.assertTrue(config.pull_up)
 
-    def test_gpio_five_way_config_from_env_supports_volume_pins(self):
+    def test_gpio_five_way_config_from_env_supports_volume_and_hold_settings(self):
         with mock.patch.dict(
             os.environ,
             {
                 "PIPOD_GPIO_VOL_UP_PIN": "22",
                 "PIPOD_GPIO_VOL_DOWN_PIN": "23",
+                "PIPOD_GPIO_SELECT_HOLD_MS": "900",
             },
         ):
             config = GpioFiveWayConfig.from_env()
 
         self.assertEqual(config.vol_up_pin, 22)
         self.assertEqual(config.vol_down_pin, 23)
+        self.assertEqual(config.select_hold_ms, 900)
+        self.assertAlmostEqual(config.select_hold_time_s, 0.9, places=6)
 
     def test_gpio_input_enqueues_events_and_closes_buttons(self):
         created: list[FakeButton] = []
 
-        def fake_factory(pin: int, pull_up: bool, bounce_time: float):
-            button = FakeButton(pin=pin, pull_up=pull_up, bounce_time=bounce_time)
+        def fake_factory(
+            pin: int,
+            pull_up: bool,
+            bounce_time: float,
+            hold_time: float | None = None,
+            hold_repeat: bool | None = None,
+        ):
+            button = FakeButton(
+                pin=pin,
+                pull_up=pull_up,
+                bounce_time=bounce_time,
+                hold_time=hold_time,
+                hold_repeat=hold_repeat,
+            )
             created.append(button)
             return button
 
@@ -593,6 +633,7 @@ class GpioInputProviderTests(unittest.TestCase):
             vol_up_pin=20,
             vol_down_pin=21,
             debounce_ms=70,
+            select_hold_ms=1200,
             pull_up=True,
         )
         gpio_input = GpioFiveWayInput(config=config, button_factory=fake_factory)
@@ -602,7 +643,10 @@ class GpioInputProviderTests(unittest.TestCase):
             self.assertTrue(button.pull_up)
 
         for button in created:
-            button.press()
+            if button.pin == config.select_pin:
+                button.release()
+            else:
+                button.press()
         self.assertEqual(
             [gpio_input.poll_nonblocking() for _ in range(7)],
             ["UP", "DOWN", "LEFT", "RIGHT", "SELECT", "VOL_UP", "VOL_DOWN"],
@@ -612,11 +656,57 @@ class GpioInputProviderTests(unittest.TestCase):
         gpio_input.close()
         self.assertTrue(all(button.closed for button in created))
 
+    def test_gpio_select_hold_suppresses_release_select(self):
+        created: list[FakeButton] = []
+
+        def fake_factory(
+            pin: int,
+            pull_up: bool,
+            bounce_time: float,
+            hold_time: float | None = None,
+            hold_repeat: bool | None = None,
+        ):
+            button = FakeButton(
+                pin=pin,
+                pull_up=pull_up,
+                bounce_time=bounce_time,
+                hold_time=hold_time,
+                hold_repeat=hold_repeat,
+            )
+            created.append(button)
+            return button
+
+        config = GpioFiveWayConfig(select_hold_ms=1500)
+        gpio_input = GpioFiveWayInput(config=config, button_factory=fake_factory)
+        select_button = next(button for button in created if button.pin == config.select_pin)
+
+        self.assertAlmostEqual(select_button.hold_time, 1.5, places=6)
+        self.assertFalse(select_button.hold_repeat)
+
+        select_button.hold()
+        select_button.release()
+
+        self.assertEqual(gpio_input.poll_nonblocking(), "SELECT_HOLD")
+        self.assertIsNone(gpio_input.poll_nonblocking())
+        gpio_input.close()
+
     def test_combined_event_provider_prioritizes_gpio_queue(self):
         created: list[FakeButton] = []
 
-        def fake_factory(pin: int, pull_up: bool, bounce_time: float):
-            button = FakeButton(pin=pin, pull_up=pull_up, bounce_time=bounce_time)
+        def fake_factory(
+            pin: int,
+            pull_up: bool,
+            bounce_time: float,
+            hold_time: float | None = None,
+            hold_repeat: bool | None = None,
+        ):
+            button = FakeButton(
+                pin=pin,
+                pull_up=pull_up,
+                bounce_time=bounce_time,
+                hold_time=hold_time,
+                hold_repeat=hold_repeat,
+            )
             created.append(button)
             return button
 
@@ -698,6 +788,14 @@ class MusicBrowserTests(unittest.TestCase):
         self.assertEqual(playlists_root.child_items[1].track_paths, custom_playlist_paths)
 
     def _run_scripted(self, events: list[str]) -> tuple[dict, MockPlayer]:
+        stats, player, _ = self._run_scripted_with_epd(events)
+        return stats, player
+
+    def _run_scripted_with_epd(
+        self,
+        events: list[str],
+        cleanup: bool = True,
+    ) -> tuple[dict, MockPlayer, FakeEPD]:
         library = FixtureLibrary(FIXTURE_PATH, seed=1337)
         player = MockPlayer(seed=1337)
         player.set_track_durations(library.duration_map())
@@ -729,10 +827,11 @@ class MusicBrowserTests(unittest.TestCase):
                 stats = run_pipod_loop(config, dependencies)
             finally:
                 library.close()
-                player.shutdown()
-                epd.sleep()
+                if cleanup:
+                    player.shutdown()
+                    epd.sleep()
 
-        return stats, player
+        return stats, player, epd
 
     def test_music_root_entries_and_view(self):
         fixture_library = FixtureLibrary(FIXTURE_PATH, seed=1337)
@@ -1015,6 +1114,78 @@ class MusicBrowserTests(unittest.TestCase):
         )
         self.assertEqual(stats["final_view"], "now_playing")
 
+    def test_select_hold_opens_power_dialog_without_changing_view(self):
+        stats, _, _ = self._run_scripted_with_epd(
+            [
+                "SELECT",  # Music root
+                "SELECT_HOLD",
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "music_root")
+        self.assertEqual(stats["power_state"], "active")
+        self.assertGreaterEqual(stats["frames_partial"], 2)
+
+    def test_power_dialog_back_cancels_without_changing_view(self):
+        stats, _, _ = self._run_scripted_with_epd(
+            [
+                "SELECT",  # Music root
+                "SELECT_HOLD",
+                "BACK",
+                "QUIT",
+            ]
+        )
+        self.assertEqual(stats["final_view"], "music_root")
+        self.assertEqual(stats["power_state"], "active")
+
+    def test_sleep_blanks_display_continues_playback_and_wakes_on_select(self):
+        stats, player, epd = self._run_scripted_with_epd(
+            [
+                "PLAY_PAUSE",
+                "SELECT_HOLD",
+                "SELECT",  # Sleep
+                "WAIT",
+                "WAIT",
+                "DOWN",  # ignored while sleeping
+                "SELECT",  # wake
+                "QUIT",
+            ],
+            cleanup=False,
+        )
+        try:
+            progress_s, _ = player.playback_progress()
+            self.assertEqual(stats["final_view"], "menu")
+            self.assertEqual(stats["power_state"], "active")
+            self.assertGreater(progress_s, 0.0)
+            self.assertFalse(epd._sleeping)
+        finally:
+            player.shutdown()
+            epd.sleep()
+
+    def test_soft_off_stops_playback_ignores_normal_input_and_wakes_on_select_hold(self):
+        stats, player, epd = self._run_scripted_with_epd(
+            [
+                "PLAY_PAUSE",
+                "SELECT_HOLD",
+                "DOWN",  # Power Off
+                "SELECT",
+                "DOWN",  # ignored while soft-off
+                "SELECT",  # ignored while soft-off
+                "SELECT_HOLD",  # wake
+                "QUIT",
+            ],
+            cleanup=False,
+        )
+        try:
+            self.assertEqual(stats["final_view"], "menu")
+            self.assertEqual(stats["selected_menu_item"], "Music")
+            self.assertEqual(stats["power_state"], "active")
+            self.assertFalse(player.is_playing())
+            self.assertFalse(epd._sleeping)
+        finally:
+            player.shutdown()
+            epd.sleep()
+
     def test_now_playing_toggle_art_mode_triggers_redraw(self):
         stats, _ = self._run_scripted(
             [
@@ -1277,7 +1448,42 @@ class SettingsActionsTests(unittest.TestCase):
             ]
         )
         self.assertTrue(result.ok)
-        self.assertEqual(result.message, "Found 1 nearby device(s), 2 paired total")
+        self.assertEqual(result.message, "Found 1 named nearby device(s), 2 paired total")
+
+    def test_bluetooth_scan_filters_unnamed_discoveries_but_keeps_paired_devices(self):
+        actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
+        scan_output = "\n".join(
+            [
+                "[NEW] Device AA:BB:CC:DD:EE:11",
+                "[NEW] Device AA:BB:CC:DD:EE:22 Unknown Device",
+                "[NEW] Device AA:BB:CC:DD:EE:33 Named Headphones",
+                "[NEW] Device AA:BB:CC:DD:EE:44 123456",
+            ]
+        )
+
+        with (
+            mock.patch("settings_actions.shutil.which", return_value="/usr/bin/bluetoothctl"),
+            mock.patch.object(actions, "_run_bt", return_value="ok"),
+            mock.patch.object(actions, "_run_bt_interactive_scan", return_value=scan_output),
+            mock.patch.object(
+                actions,
+                "_list_devices",
+                return_value=[("AA:BB:CC:DD:EE:11", "Already Paired")],
+            ),
+            mock.patch.object(actions, "_devices_with_state", return_value=[]) as with_state,
+        ):
+            result = actions.bluetooth_scan(duration_s=4)
+
+        with_state.assert_called_once_with(
+            [
+                ("AA:BB:CC:DD:EE:33", "Named Headphones"),
+                ("AA:BB:CC:DD:EE:11", "Already Paired"),
+            ]
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.details["nearby_count"], 1)
+        self.assertEqual(result.details["raw_nearby_count"], 4)
+        self.assertEqual(result.message, "Found 1 named nearby device(s), 1 paired total")
 
     def test_bluetooth_scan_timeout_returns_error_with_paired_fallback(self):
         actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
@@ -1303,6 +1509,75 @@ class SettingsActionsTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.message, "Bluetooth scan timed out")
         self.assertEqual(result.details["devices"], fallback_devices)
+
+    def test_bluetooth_pair_connect_uses_single_agent_session_and_accepts_already_paired(self):
+        actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
+        session_output = "\n".join(
+            [
+                "Agent registered",
+                "Default agent request successful",
+                "Failed to pair: org.bluez.Error.AlreadyExists",
+                "Changing AA:BB:CC:DD:EE:44 trust succeeded",
+                "Connection successful",
+            ]
+        )
+        info_output = "\n".join(
+            [
+                "Device AA:BB:CC:DD:EE:44",
+                "Paired: yes",
+                "Trusted: yes",
+                "Connected: yes",
+            ]
+        )
+
+        with (
+            mock.patch("settings_actions.shutil.which", return_value="/usr/bin/bluetoothctl"),
+            mock.patch.object(actions, "_run_bt_session", return_value=session_output) as run_session,
+            mock.patch.object(actions, "_run_bt", return_value=info_output) as run_bt,
+        ):
+            result = actions.bluetooth_pair_connect("aa:bb:cc:dd:ee:44")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.message, "Connected headphones")
+        run_session.assert_called_once_with(
+            [
+                "power on",
+                "agent on",
+                "default-agent",
+                "pairable on",
+                "pair AA:BB:CC:DD:EE:44",
+                "trust AA:BB:CC:DD:EE:44",
+                "connect AA:BB:CC:DD:EE:44",
+            ],
+            timeout=45,
+        )
+        run_bt.assert_called_once_with(["info", "AA:BB:CC:DD:EE:44"])
+
+    def test_bluetooth_connect_powers_adapter_and_accepts_already_connected(self):
+        actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
+        session_output = "Failed to connect: org.bluez.Error.AlreadyConnected"
+        info_output = "\n".join(
+            [
+                "Device AA:BB:CC:DD:EE:55",
+                "Paired: yes",
+                "Trusted: yes",
+                "Connected: yes",
+            ]
+        )
+
+        with (
+            mock.patch("settings_actions.shutil.which", return_value="/usr/bin/bluetoothctl"),
+            mock.patch.object(actions, "_run_bt_session", return_value=session_output) as run_session,
+            mock.patch.object(actions, "_run_bt", return_value=info_output),
+        ):
+            result = actions.bluetooth_connect("aa:bb:cc:dd:ee:55")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.message, "Connected")
+        run_session.assert_called_once_with(
+            ["power on", "connect AA:BB:CC:DD:EE:55"],
+            timeout=25,
+        )
 
 
 class RuntimeSettingsFlowTests(unittest.TestCase):

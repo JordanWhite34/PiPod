@@ -52,6 +52,7 @@ MENU_ITEMS = [
 
 DEFAULT_FOOTER_TEXT = "u/d/s q p n r"
 NOW_PLAYING_FOOTER_TEXT = "b back  t art  q quit"
+POWER_DIALOG_OPTIONS = ("Sleep", "Power Off")
 FOOTER_SCROLL_INTERVAL_S = 0.16
 FOOTER_SCROLL_STEP_PX = 1
 FOOTER_SCROLL_GAP_PX = 24
@@ -174,6 +175,8 @@ class PlayerLike(Protocol):
 
     def current_track_path(self) -> Path | None: ...
 
+    def stop(self): ...
+
     def shutdown(self): ...
 
 
@@ -220,6 +223,11 @@ INPUT_TOKEN_MAPPING = {
     "down": "DOWN",
     "s": "SELECT",
     "select": "SELECT",
+    "hold": "SELECT_HOLD",
+    "select_hold": "SELECT_HOLD",
+    "select-hold": "SELECT_HOLD",
+    "long_select": "SELECT_HOLD",
+    "long-select": "SELECT_HOLD",
     "left": "LEFT",
     "right": "RIGHT",
     "b": "BACK",
@@ -279,6 +287,7 @@ class RunStats:
     now_playing_label: str = ""
     now_playing_context_label: str = ""
     library_totals_label: str = ""
+    power_state: str = "active"
 
     @property
     def frames_total(self) -> int:
@@ -299,6 +308,7 @@ class RunStats:
             "now_playing_label": self.now_playing_label,
             "now_playing_context_label": self.now_playing_context_label,
             "library_totals_label": self.library_totals_label,
+            "power_state": self.power_state,
         }
 
 
@@ -954,9 +964,9 @@ def _settings_bluetooth_items(bt_status: SettingsActionResult) -> tuple[Settings
     return (
         SettingsItem(
             id="settings:bt_scan",
-            label="Scan & Pair Headphones",
+            label="Scan for Headphones",
             kind="action",
-            help_text="Find nearby devices and pair",
+            help_text="Put headphones in pairing mode first",
             action="bt_scan",
         ),
         SettingsItem(
@@ -988,12 +998,13 @@ def _settings_bluetooth_scan_items(result: SettingsActionResult) -> tuple[Settin
     ]
     for device in devices:
         state = "connected" if device.connected else "paired" if device.paired else "new"
+        action_label = "Use" if device.connected else "Connect" if device.paired else "Pair"
         items.append(
             SettingsItem(
                 id=f"settings:bt_scan:{device.address}",
-                label=f"{device.name} ({state})",
+                label=f"{action_label}: {device.name} ({state})",
                 kind="action",
-                help_text="Pair and connect this device",
+                help_text="Pair/trust/connect with bluetoothctl",
                 action="bt_pair_connect",
                 address=device.address,
             )
@@ -1004,7 +1015,7 @@ def _settings_bluetooth_scan_items(result: SettingsActionResult) -> tuple[Settin
                 id="settings:bt_scan_none",
                 label="No devices found",
                 kind="info",
-                help_text="Try Scan Again with device in pairing mode",
+                help_text="Put headphones in pairing mode, then scan again",
             )
         )
     return tuple(items)
@@ -2777,6 +2788,42 @@ def render_menu(
     return image
 
 
+def render_power_dialog(epd, fonts, base_image: Image.Image, selected_idx: int = 0) -> Image.Image:
+    image = base_image.convert("1").copy()
+    draw = ImageDraw.Draw(image)
+    _, item_font, hint_font = fonts
+
+    dialog_w = min(epd.width - 16, 104)
+    dialog_h = 82
+    x0 = max(4, (epd.width - dialog_w) // 2)
+    y0 = max(28, (epd.height - dialog_h) // 2)
+    x1 = x0 + dialog_w - 1
+    y1 = y0 + dialog_h - 1
+
+    draw_rounded_box(draw, x0, y0, x1, y1, fill=255, outline=0, radius=4, width=1)
+    title = "Power"
+    title_x = x0 + max(4, (dialog_w - measure_text_width(title, item_font)) // 2)
+    draw.text((title_x, y0 + 7), title, font=item_font, fill=0)
+    draw.line((x0 + 6, y0 + 27, x1 - 6, y0 + 27), fill=0)
+
+    selected_idx = _clamp_index(selected_idx, len(POWER_DIALOG_OPTIONS))
+    row_y = y0 + 34
+    row_h = 20
+    for idx, label in enumerate(POWER_DIALOG_OPTIONS):
+        top = row_y + (idx * row_h)
+        if idx == selected_idx:
+            draw.rectangle((x0 + 8, top - 2, x1 - 8, top + 15), fill=0)
+            draw.text((x0 + 13, top), label, font=item_font, fill=255)
+        else:
+            draw.text((x0 + 13, top), label, font=item_font, fill=0)
+
+    hint = "s select  b back"
+    hint_text = ellipsize_text(hint, hint_font, dialog_w - 12)
+    hint_x = x0 + max(6, (dialog_w - measure_text_width(hint_text, hint_font)) // 2)
+    draw.text((hint_x, y1 - 14), hint_text, font=hint_font, fill=0)
+    return image
+
+
 def render_music_browser(
     epd,
     fonts,
@@ -3416,6 +3463,9 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
     footer_width = epd.width - 12
     footer_scroll_px = 0
     footer_selected = False
+    power_state = "active"
+    power_dialog_open = False
+    power_dialog_selected_idx = 0
 
     virtual_clock = 0.0
 
@@ -3712,6 +3762,136 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
             set_now_playing_context_label()
         footer_selected = False
 
+    def blank_and_sleep_display():
+        try:
+            epd.init()
+            epd.Clear(0xFF)
+            epd.sleep()
+        except Exception as exc:
+            logging.warning("Failed to blank/sleep display: %s", exc)
+
+    def stop_player_for_soft_off():
+        stop = getattr(player, "stop", None)
+        if callable(stop):
+            try:
+                stop()
+                return
+            except Exception as exc:
+                logging.warning("Player stop failed during soft-off: %s", exc)
+
+    def open_power_dialog():
+        nonlocal power_dialog_open
+        nonlocal power_dialog_selected_idx
+        power_dialog_open = True
+        power_dialog_selected_idx = 0
+
+    def close_power_dialog():
+        nonlocal power_dialog_open
+        nonlocal power_dialog_selected_idx
+        power_dialog_open = False
+        power_dialog_selected_idx = 0
+
+    def enter_sleep_state():
+        nonlocal power_state
+        close_power_dialog()
+        power_state = "sleep"
+        blank_and_sleep_display()
+
+    def enter_soft_off_state():
+        nonlocal power_state
+        nonlocal current_view
+        nonlocal selected_idx
+        nonlocal footer_selected
+        nonlocal now_playing_last_progress_bucket
+        close_power_dialog()
+        stop_player_for_soft_off()
+        current_view = "menu"
+        selected_idx = 0
+        footer_selected = False
+        now_playing_last_progress_bucket = -1
+        set_selected_label(footer_status_label(library_totals_label, player))
+        power_state = "soft_off"
+        blank_and_sleep_display()
+
+    def wake_from_sleep():
+        nonlocal power_state
+        try:
+            epd.init()
+        except Exception as exc:
+            logging.warning("Failed to reinitialize display after sleep: %s", exc)
+        power_state = "active"
+
+    def wake_from_soft_off():
+        nonlocal power_state
+        nonlocal current_view
+        nonlocal selected_idx
+        nonlocal footer_selected
+        current_view = "menu"
+        selected_idx = 0
+        footer_selected = False
+        set_selected_label(footer_status_label(library_totals_label, player))
+        try:
+            epd.init()
+        except Exception as exc:
+            logging.warning("Failed to reinitialize display after soft-off: %s", exc)
+        power_state = "active"
+
+    def render_current_frame(status):
+        if current_view == "now_playing":
+            image = render_now_playing(
+                epd,
+                fonts,
+                player,
+                library,
+                status,
+                status_plumbing.charge_anim_frame(),
+                album_art_cache,
+                album_art_render_mode=album_art_render_mode,
+                focus_index=now_playing_focus_index,
+                song_scroll_px=now_playing_song_scroll_px,
+                context_label=now_playing_context_label,
+                idle_art_selection=settings.now_playing_idle_art,
+                progress_ring_enabled=settings.now_playing_progress_ring,
+            )
+        elif current_view in ("music_root", "music_list"):
+            image = render_music_browser(
+                epd,
+                fonts,
+                _current_music_view(music_nav_stack),
+                status,
+                status_plumbing.charge_anim_frame(),
+                selected_label=selected_label,
+                footer_scroll_px=footer_scroll_px,
+                selected_item_scroll_px=music_item_scroll_px,
+                footer_selected=footer_selected,
+            )
+        elif current_view in ("settings_root", "settings_list"):
+            image = render_settings_browser(
+                epd,
+                fonts,
+                _current_settings_view(settings_nav_stack),
+                status,
+                status_plumbing.charge_anim_frame(),
+                selected_label=selected_label,
+                footer_scroll_px=footer_scroll_px,
+                selected_item_scroll_px=settings_item_scroll_px,
+                footer_selected=footer_selected,
+            )
+        else:
+            image = render_menu(
+                epd,
+                fonts,
+                selected_idx,
+                status,
+                status_plumbing.charge_anim_frame(),
+                selected_label,
+                footer_scroll_px=footer_scroll_px,
+                footer_selected=footer_selected,
+            )
+        if power_dialog_open:
+            image = render_power_dialog(epd, fonts, image, power_dialog_selected_idx)
+        return image
+
     try:
         status = status_plumbing.read()
         sync_audio_output(status, player)
@@ -3726,16 +3906,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
 
         set_selected_label(footer_status_label(library_totals_label, player))
 
-        image = render_menu(
-            epd,
-            fonts,
-            selected_idx,
-            status,
-            status_plumbing.charge_anim_frame(),
-            selected_label,
-            footer_scroll_px=footer_scroll_px,
-            footer_selected=footer_selected,
-        )
+        image = render_current_frame(status)
         epd.displayPartBaseImage(epd.getbuffer(image))
         stats.frames_base += 1
 
@@ -3764,7 +3935,36 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
                 stats.events_processed += 1
                 if event == "QUIT":
                     break
-                if current_view == "menu" and event == "UP":
+                if power_state == "sleep":
+                    if event == "SELECT":
+                        wake_from_sleep()
+                        should_redraw = True
+                elif power_state == "soft_off":
+                    if event == "SELECT_HOLD":
+                        wake_from_soft_off()
+                        should_redraw = True
+                elif power_dialog_open:
+                    if event == "UP":
+                        power_dialog_selected_idx = (power_dialog_selected_idx - 1) % len(POWER_DIALOG_OPTIONS)
+                        should_redraw = True
+                    elif event == "DOWN":
+                        power_dialog_selected_idx = (power_dialog_selected_idx + 1) % len(POWER_DIALOG_OPTIONS)
+                        should_redraw = True
+                    elif event == "BACK":
+                        close_power_dialog()
+                        should_redraw = True
+                    elif event == "SELECT":
+                        selected_power_action = POWER_DIALOG_OPTIONS[
+                            _clamp_index(power_dialog_selected_idx, len(POWER_DIALOG_OPTIONS))
+                        ]
+                        if selected_power_action == "Sleep":
+                            enter_sleep_state()
+                        else:
+                            enter_soft_off_state()
+                elif event == "SELECT_HOLD":
+                    open_power_dialog()
+                    should_redraw = True
+                elif current_view == "menu" and event == "UP":
                     if footer_selected:
                         footer_selected = False
                         selected_idx = len(MENU_ITEMS) - 1
@@ -4280,59 +4480,9 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
 
             should_redraw = status_plumbing.tick_animation() or should_redraw
 
-            if should_redraw:
+            if should_redraw and power_state == "active":
                 status = status_plumbing.read()
-                if current_view == "now_playing":
-                    image = render_now_playing(
-                        epd,
-                        fonts,
-                        player,
-                        library,
-                        status,
-                        status_plumbing.charge_anim_frame(),
-                        album_art_cache,
-                        album_art_render_mode=album_art_render_mode,
-                        focus_index=now_playing_focus_index,
-                        song_scroll_px=now_playing_song_scroll_px,
-                        context_label=now_playing_context_label,
-                        idle_art_selection=settings.now_playing_idle_art,
-                        progress_ring_enabled=settings.now_playing_progress_ring,
-                    )
-                elif current_view in ("music_root", "music_list"):
-                    image = render_music_browser(
-                        epd,
-                        fonts,
-                        _current_music_view(music_nav_stack),
-                        status,
-                        status_plumbing.charge_anim_frame(),
-                        selected_label=selected_label,
-                        footer_scroll_px=footer_scroll_px,
-                        selected_item_scroll_px=music_item_scroll_px,
-                        footer_selected=footer_selected,
-                    )
-                elif current_view in ("settings_root", "settings_list"):
-                    image = render_settings_browser(
-                        epd,
-                        fonts,
-                        _current_settings_view(settings_nav_stack),
-                        status,
-                        status_plumbing.charge_anim_frame(),
-                        selected_label=selected_label,
-                        footer_scroll_px=footer_scroll_px,
-                        selected_item_scroll_px=settings_item_scroll_px,
-                        footer_selected=footer_selected,
-                    )
-                else:
-                    image = render_menu(
-                        epd,
-                        fonts,
-                        selected_idx,
-                        status,
-                        status_plumbing.charge_anim_frame(),
-                        selected_label,
-                        footer_scroll_px=footer_scroll_px,
-                        footer_selected=footer_selected,
-                    )
+                image = render_current_frame(status)
                 epd.displayPartial(epd.getbuffer(image))
                 stats.frames_partial += 1
 
@@ -4342,6 +4492,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
         stats.now_playing_label = _safe_now_playing_label(player)
         stats.now_playing_context_label = now_playing_context_label
         stats.library_totals_label = library_totals_label
+        stats.power_state = power_state
         return stats.to_dict()
 
     except KeyboardInterrupt:
@@ -4351,6 +4502,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
         stats.selected_menu_item = MENU_ITEMS[selected_idx]
         stats.now_playing_label = _safe_now_playing_label(player)
         stats.now_playing_context_label = now_playing_context_label
+        stats.power_state = power_state
         return stats.to_dict()
     except Exception as exc:
         stats.status = "error"
@@ -4360,6 +4512,7 @@ def run_pipod_loop(config: RunConfig, dependencies: RuntimeDependencies) -> dict
         stats.selected_menu_item = MENU_ITEMS[selected_idx]
         stats.now_playing_label = _safe_now_playing_label(player)
         stats.now_playing_context_label = now_playing_context_label
+        stats.power_state = power_state
         if config.raise_exceptions:
             raise
         return stats.to_dict()
