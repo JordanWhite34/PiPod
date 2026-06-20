@@ -190,6 +190,30 @@ class SettingsActions:
         pair_ok = paired or trusted or connected or self._pair_succeeded(session_output)
         connect_ok = connected or self._connect_succeeded(session_output)
         ok = connect_ok and pair_ok
+
+        if not ok:
+            fallback_output = self._run_bt_session(
+                [
+                    "power on",
+                    "agent on",
+                    "default-agent",
+                    f"trust {address}",
+                    f"connect {address}",
+                ],
+                timeout=25,
+            )
+            if fallback_output is not None:
+                session_output = (
+                    f"{session_output}\n--- fallback trust/connect ---\n{fallback_output}"
+                ).strip()
+                info_output = self._run_bt(["info", address]) or ""
+                paired = self._parse_bt_flag(info_output, "Paired")
+                connected = self._parse_bt_flag(info_output, "Connected")
+                trusted = self._parse_bt_flag(info_output, "Trusted")
+                pair_ok = paired or trusted or connected or self._pair_succeeded(session_output)
+                connect_ok = connected or self._connect_succeeded(session_output)
+                ok = connect_ok and pair_ok
+
         audio_sink_result = self._set_default_bluetooth_sink(address) if ok else {
             "ok": False,
             "message": "Bluetooth not connected",

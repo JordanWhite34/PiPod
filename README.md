@@ -45,7 +45,6 @@ If your DAC is wired as:
 
 Important GPIO conflicts with the default PiPod wiring:
 - I2S `BCK` uses `GPIO18`. The Waveshare display driver also defaults its optional `PWR` control line to `GPIO18`.
-- I2S `LCK/LRCK` uses `GPIO19`. The default `MAIN_CENTER` button also uses `GPIO19`.
 - I2S `DIN` uses `GPIO21`. The default `VOL_DOWN` button also uses `GPIO21`.
 
 For I2S audio and e-paper at the same time, do one of these before launching PiPod:
@@ -59,10 +58,9 @@ export PIPOD_EPD_PWR_PIN=22
 ```
 
 If you use the default GPIO buttons with I2S audio, also move the conflicting
-buttons to free BCM pins:
+volume button to a free BCM pin:
 
 ```bash
-export PIPOD_GPIO_SELECT_PIN=16
 export PIPOD_GPIO_VOL_DOWN_PIN=26
 ```
 

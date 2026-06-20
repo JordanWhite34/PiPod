@@ -581,7 +581,7 @@ class GpioInputProviderTests(unittest.TestCase):
         self.assertEqual(config.down_pin, 6)
         self.assertEqual(config.left_pin, 12)
         self.assertEqual(config.right_pin, 13)
-        self.assertEqual(config.select_pin, 19)
+        self.assertEqual(config.select_pin, 16)
         self.assertEqual(config.vol_up_pin, 20)
         self.assertEqual(config.vol_down_pin, 21)
         self.assertEqual(config.debounce_ms, 70)
@@ -630,7 +630,7 @@ class GpioInputProviderTests(unittest.TestCase):
             down_pin=6,
             left_pin=12,
             right_pin=13,
-            select_pin=19,
+            select_pin=16,
             vol_up_pin=20,
             vol_down_pin=21,
             debounce_ms=70,
@@ -1668,6 +1668,74 @@ class SettingsActionsTests(unittest.TestCase):
         self.assertTrue(result.details["trusted"])
         self.assertTrue(result.details["connected"])
         set_sink.assert_called_once_with("90:9C:4A:E6:E7:F2")
+
+    def test_bluetooth_pair_connect_falls_back_to_trust_connect_when_pair_fails(self):
+        actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
+        first_info = "\n".join(
+            [
+                "Device 90:9C:4A:E6:E7:F2",
+                "Paired: no",
+                "Trusted: no",
+                "Connected: no",
+            ]
+        )
+        second_info = "\n".join(
+            [
+                "Device 90:9C:4A:E6:E7:F2",
+                "Paired: no",
+                "Trusted: yes",
+                "Connected: yes",
+            ]
+        )
+
+        with (
+            mock.patch("settings_actions.shutil.which", return_value="/usr/bin/bluetoothctl"),
+            mock.patch.object(
+                actions,
+                "_run_bt_session",
+                side_effect=[
+                    "Failed to pair: org.bluez.Error.AuthenticationFailed",
+                    "Changing 90:9C:4A:E6:E7:F2 trust succeeded\nConnection successful",
+                ],
+            ) as run_session,
+            mock.patch.object(actions, "_run_bt", side_effect=[first_info, second_info]),
+            mock.patch.object(
+                actions,
+                "_set_default_bluetooth_sink",
+                return_value={"ok": True, "sink": "bluez_output.90_9C_4A_E6_E7_F2.a2dp-sink"},
+            ),
+        ):
+            result = actions.bluetooth_pair_connect("90:9c:4a:e6:e7:f2")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.message, "Connected headphones")
+        self.assertIn("fallback trust/connect", result.details["output"])
+        run_session.assert_has_calls(
+            [
+                mock.call(
+                    [
+                        "power on",
+                        "agent on",
+                        "default-agent",
+                        "pairable on",
+                        "pair 90:9C:4A:E6:E7:F2",
+                        "trust 90:9C:4A:E6:E7:F2",
+                        "connect 90:9C:4A:E6:E7:F2",
+                    ],
+                    timeout=45,
+                ),
+                mock.call(
+                    [
+                        "power on",
+                        "agent on",
+                        "default-agent",
+                        "trust 90:9C:4A:E6:E7:F2",
+                        "connect 90:9C:4A:E6:E7:F2",
+                    ],
+                    timeout=25,
+                ),
+            ]
+        )
 
     def test_bluetooth_connect_powers_adapter_and_accepts_already_connected(self):
         actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)

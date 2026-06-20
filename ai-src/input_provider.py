@@ -43,7 +43,7 @@ class GpioFiveWayConfig:
     down_pin: int = 6
     left_pin: int = 12
     right_pin: int = 13
-    select_pin: int = 19
+    select_pin: int = 16
     vol_up_pin: int | None = 20
     vol_down_pin: int | None = 21
     debounce_ms: int = 70
@@ -66,7 +66,7 @@ class GpioFiveWayConfig:
             down_pin=_env_int("PIPOD_GPIO_DOWN_PIN", 6),
             left_pin=_env_int("PIPOD_GPIO_LEFT_PIN", 12),
             right_pin=_env_int("PIPOD_GPIO_RIGHT_PIN", 13),
-            select_pin=_env_int("PIPOD_GPIO_SELECT_PIN", 19),
+            select_pin=_env_int("PIPOD_GPIO_SELECT_PIN", 16),
             vol_up_pin=_env_int("PIPOD_GPIO_VOL_UP_PIN", 20),
             vol_down_pin=_env_int("PIPOD_GPIO_VOL_DOWN_PIN", 21),
             debounce_ms=_env_int("PIPOD_GPIO_DEBOUNCE_MS", 70),

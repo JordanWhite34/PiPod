@@ -37,13 +37,13 @@ Examples:
 
 PiPod uses BCM numbering by default:
 
-- `MAIN_UP` / `UP` = GPIO `5`
-- `MAIN_DOWN` / `DOWN` = GPIO `6`
-- `MAIN_LEFT` / `LEFT` = GPIO `12`
-- `MAIN_RIGHT` / `RIGHT` = GPIO `13`
-- `MAIN_CENTER` / `SELECT` = GPIO `19`
-- `VOL_UP` = GPIO `20`
-- `VOL_DOWN` = GPIO `21`
+- `MAIN_UP` / `UP` = GPIO `5` (physical pin `29`)
+- `MAIN_DOWN` / `DOWN` = GPIO `6` (physical pin `31`)
+- `MAIN_LEFT` / `LEFT` = GPIO `12` (physical pin `32`)
+- `MAIN_RIGHT` / `RIGHT` = GPIO `13` (physical pin `33`)
+- `MAIN_CENTER` / `SELECT` = GPIO `16` (physical pin `36`)
+- `VOL_UP` = GPIO `20` (physical pin `38`)
+- `VOL_DOWN` = GPIO `21` (physical pin `40`)
 
 Equivalent Python mapping:
 
@@ -53,15 +53,14 @@ BUTTON_PINS = {
     "MAIN_DOWN": 6,
     "MAIN_LEFT": 12,
     "MAIN_RIGHT": 13,
-    "MAIN_CENTER": 19,
+    "MAIN_CENTER": 16,
     "VOL_UP": 20,
     "VOL_DOWN": 21,
 }
 ```
 
 If I2S audio is enabled with the DAC wiring in the README, note that I2S uses
-GPIO `19` for `LRCK` and GPIO `21` for `DIN`. Those conflict with
-`MAIN_CENTER` and `VOL_DOWN` in this button map.
+GPIO `21` for `DIN`. That conflicts with `VOL_DOWN` in this button map.
 
 ## Wiring Assumptions
 
@@ -81,7 +80,7 @@ All settings are optional. If unset, defaults are used.
 - `PIPOD_GPIO_DOWN_PIN` (default `6`)
 - `PIPOD_GPIO_LEFT_PIN` (default `12`)
 - `PIPOD_GPIO_RIGHT_PIN` (default `13`)
-- `PIPOD_GPIO_SELECT_PIN` (default `19`)
+- `PIPOD_GPIO_SELECT_PIN` (default `16`)
 - `PIPOD_GPIO_VOL_UP_PIN` (default `20`)
 - `PIPOD_GPIO_VOL_DOWN_PIN` (default `21`)
 - `PIPOD_GPIO_DEBOUNCE_MS` (default `70`)
@@ -98,7 +97,7 @@ export PIPOD_GPIO_UP_PIN=5
 export PIPOD_GPIO_DOWN_PIN=6
 export PIPOD_GPIO_LEFT_PIN=12
 export PIPOD_GPIO_RIGHT_PIN=13
-export PIPOD_GPIO_SELECT_PIN=19
+export PIPOD_GPIO_SELECT_PIN=16
 export PIPOD_GPIO_VOL_UP_PIN=20
 export PIPOD_GPIO_VOL_DOWN_PIN=21
 export PIPOD_GPIO_DEBOUNCE_MS=70
