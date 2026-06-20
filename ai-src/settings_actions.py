@@ -105,6 +105,12 @@ class SettingsActions:
                         message=f"Bluetooth adapter setup failed ({' '.join(command)})",
                         details={"devices": fallback_devices, "output": prep_output},
                     )
+                if self._output_indicates_failure(prep_output):
+                    logging.info(
+                        "Bluetooth scan setup continuing after non-fatal '%s' output: %s",
+                        " ".join(command),
+                        prep_output,
+                    )
 
             scan_output = self._run_bt_interactive_scan(scan_timeout)
             if scan_output is None:
@@ -184,6 +190,10 @@ class SettingsActions:
         pair_ok = paired or self._pair_succeeded(session_output)
         connect_ok = connected or self._connect_succeeded(session_output)
         ok = pair_ok and connect_ok
+        audio_sink_result = self._set_default_bluetooth_sink(address) if ok else {
+            "ok": False,
+            "message": "Bluetooth not connected",
+        }
 
         if ok and paired:
             message = "Connected headphones"
@@ -203,6 +213,7 @@ class SettingsActions:
                 "trusted": trusted,
                 "output": session_output,
                 "info_output": info_output,
+                "audio_sink": audio_sink_result,
             },
         )
 
@@ -220,6 +231,10 @@ class SettingsActions:
         info_output = self._run_bt(["info", address]) or ""
         connected = self._parse_bt_flag(info_output, "Connected")
         ok = connected or self._connect_succeeded(session_output)
+        audio_sink_result = self._set_default_bluetooth_sink(address) if ok else {
+            "ok": False,
+            "message": "Bluetooth not connected",
+        }
         return SettingsActionResult(
             ok=ok,
             message="Connected" if ok else "Connect failed",
@@ -228,6 +243,7 @@ class SettingsActions:
                 "connected": connected,
                 "output": session_output,
                 "info_output": info_output,
+                "audio_sink": audio_sink_result,
             },
         )
 
@@ -318,6 +334,8 @@ class SettingsActions:
 
     def _single_bt_action(self, command: list[str], success_message: str) -> SettingsActionResult:
         address = str(command[-1]).strip().upper()
+        if not address:
+            return SettingsActionResult(ok=False, message="Bluetooth address required")
         if shutil.which("bluetoothctl") is None:
             return SettingsActionResult(ok=False, message="Bluetooth unavailable: bluetoothctl missing")
         output = self._run_bt(command) or ""
@@ -530,6 +548,111 @@ class SettingsActions:
         output = self._run_bt([command]) or ""
         return self._parse_devices(output)
 
+    def _set_default_bluetooth_sink(self, address: str) -> dict[str, object]:
+        if shutil.which("pactl") is None:
+            return {"ok": False, "message": "pactl missing"}
+
+        normalized_address = str(address or "").strip().upper().replace(":", "_")
+        try:
+            sinks_output = subprocess.run(
+                ["pactl", "list", "short", "sinks"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception as exc:
+            logging.warning("Failed listing audio sinks with pactl: %s", exc)
+            return {"ok": False, "message": f"pactl list sinks failed: {exc}"}
+
+        sink_name = self._select_bluetooth_sink(sinks_output.stdout, normalized_address)
+        if not sink_name:
+            return {
+                "ok": False,
+                "message": "No Bluetooth audio sink found",
+                "output": str(sinks_output.stdout or "").strip(),
+            }
+
+        try:
+            set_default = subprocess.run(
+                ["pactl", "set-default-sink", sink_name],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception as exc:
+            logging.warning("Failed setting Bluetooth default sink: %s", exc)
+            return {"ok": False, "message": f"pactl set-default-sink failed: {exc}", "sink": sink_name}
+
+        if set_default.returncode != 0:
+            return {
+                "ok": False,
+                "message": "pactl set-default-sink failed",
+                "sink": sink_name,
+                "output": f"{set_default.stdout}\n{set_default.stderr}".strip(),
+            }
+
+        moved_inputs = self._move_sink_inputs_to_sink(sink_name)
+        return {
+            "ok": True,
+            "message": "Bluetooth audio sink selected",
+            "sink": sink_name,
+            "moved_inputs": moved_inputs,
+        }
+
+    @staticmethod
+    def _select_bluetooth_sink(output: str, normalized_address: str = "") -> str | None:
+        fallback: str | None = None
+        normalized_address = str(normalized_address or "").strip().upper()
+        for raw_line in str(output or "").splitlines():
+            parts = raw_line.split()
+            if len(parts) < 2:
+                continue
+            sink_name = parts[1].strip()
+            sink_key = sink_name.upper()
+            if "BLUEZ" not in sink_key:
+                continue
+            if fallback is None:
+                fallback = sink_name
+            if normalized_address and normalized_address in sink_key:
+                return sink_name
+        return fallback
+
+    def _move_sink_inputs_to_sink(self, sink_name: str) -> int:
+        try:
+            inputs_output = subprocess.run(
+                ["pactl", "list", "short", "sink-inputs"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception as exc:
+            logging.warning("Failed listing sink inputs with pactl: %s", exc)
+            return 0
+
+        moved = 0
+        for raw_line in str(inputs_output.stdout or "").splitlines():
+            parts = raw_line.split()
+            if not parts:
+                continue
+            input_id = parts[0].strip()
+            try:
+                move_result = subprocess.run(
+                    ["pactl", "move-sink-input", input_id, sink_name],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except Exception as exc:
+                logging.warning("Failed moving sink input %s to %s: %s", input_id, sink_name, exc)
+                continue
+            if move_result.returncode == 0:
+                moved += 1
+        return moved
+
     def _run_bt(self, commands: list[str]) -> str | None:
         try:
             proc = subprocess.run(
@@ -624,15 +747,6 @@ class SettingsActions:
     @classmethod
     def _bt_setup_command_failed(cls, command: list[str], output: str) -> bool:
         command_text = " ".join(str(part).strip().lower() for part in command)
-        lowered = str(output or "").strip().lower()
-        if command_text == "agent on" and any(
-            marker in lowered
-            for marker in (
-                "alreadyexists",
-                "already exists",
-                "already registered",
-                "agent already registered",
-            )
-        ):
+        if command_text in {"agent on", "default-agent", "pairable on"}:
             return False
         return cls._output_indicates_failure(output)

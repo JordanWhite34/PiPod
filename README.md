@@ -183,8 +183,9 @@ Bluetooth scan and pairing (Pi Zero 2 W):
 - Scan results hide address-only, numeric-only, and unknown-name discoveries, then add paired devices even when they are not currently nearby
 - Selecting a device runs `power on`, `agent on`, `default-agent`, `pairable on`, `pair`, `trust`, and `connect` in one `bluetoothctl` session
 - Already-paired or already-connected headphones are treated as usable successes when BlueZ reports the final device state as connected
+- After a successful connect, PiPod uses `pactl` when available to select the matching `bluez` audio sink and move active audio streams to it
 - If scanning times out or fails, PiPod returns a safe fallback list of paired devices
-- Requirement: `bluetoothctl` must be installed and the Bluetooth service running on the Pi
+- Requirement: `bluetoothctl` must be installed and the Bluetooth service running on the Pi; `pactl` is recommended for automatic audio routing
 
 Settings persistence:
 - `data/settings.json`

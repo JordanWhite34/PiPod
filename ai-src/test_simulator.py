@@ -5,6 +5,7 @@ import tempfile
 import os
 import json
 from pathlib import Path
+import subprocess
 import sys
 from types import SimpleNamespace
 import unittest
@@ -1450,13 +1451,13 @@ class SettingsActionsTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.message, "Found 1 named nearby device(s), 2 paired total")
 
-    def test_bluetooth_scan_allows_agent_already_registered(self):
+    def test_bluetooth_scan_treats_agent_setup_as_best_effort(self):
         actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
         prep_outputs = {
             ("power", "on"): "Changing power on succeeded",
-            ("agent", "on"): "Failed to register agent: org.bluez.Error.AlreadyExists",
-            ("default-agent",): "Default agent request successful",
-            ("pairable", "on"): "Changing pairable on succeeded",
+            ("agent", "on"): "Failed to register agent: mystery BlueZ agent error",
+            ("default-agent",): "Failed to request default agent: no agent",
+            ("pairable", "on"): "Failed to set pairable on: transient error",
         }
 
         def fake_run_bt(command):
@@ -1563,6 +1564,11 @@ class SettingsActionsTests(unittest.TestCase):
             mock.patch("settings_actions.shutil.which", return_value="/usr/bin/bluetoothctl"),
             mock.patch.object(actions, "_run_bt_session", return_value=session_output) as run_session,
             mock.patch.object(actions, "_run_bt", return_value=info_output) as run_bt,
+            mock.patch.object(
+                actions,
+                "_set_default_bluetooth_sink",
+                return_value={"ok": True, "sink": "bluez_output.AA_BB_CC_DD_EE_44.a2dp-sink"},
+            ) as set_sink,
         ):
             result = actions.bluetooth_pair_connect("aa:bb:cc:dd:ee:44")
 
@@ -1581,6 +1587,8 @@ class SettingsActionsTests(unittest.TestCase):
             timeout=45,
         )
         run_bt.assert_called_once_with(["info", "AA:BB:CC:DD:EE:44"])
+        set_sink.assert_called_once_with("AA:BB:CC:DD:EE:44")
+        self.assertTrue(result.details["audio_sink"]["ok"])
 
     def test_bluetooth_connect_powers_adapter_and_accepts_already_connected(self):
         actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
@@ -1598,6 +1606,11 @@ class SettingsActionsTests(unittest.TestCase):
             mock.patch("settings_actions.shutil.which", return_value="/usr/bin/bluetoothctl"),
             mock.patch.object(actions, "_run_bt_session", return_value=session_output) as run_session,
             mock.patch.object(actions, "_run_bt", return_value=info_output),
+            mock.patch.object(
+                actions,
+                "_set_default_bluetooth_sink",
+                return_value={"ok": True, "sink": "bluez_output.AA_BB_CC_DD_EE_55.a2dp-sink"},
+            ) as set_sink,
         ):
             result = actions.bluetooth_connect("aa:bb:cc:dd:ee:55")
 
@@ -1607,6 +1620,54 @@ class SettingsActionsTests(unittest.TestCase):
             ["power on", "connect AA:BB:CC:DD:EE:55"],
             timeout=25,
         )
+        set_sink.assert_called_once_with("AA:BB:CC:DD:EE:55")
+        self.assertTrue(result.details["audio_sink"]["ok"])
+
+    def test_select_bluetooth_sink_prefers_matching_address(self):
+        output = "\n".join(
+            [
+                "0\talsa_output.platform.bcm2835\tmodule-alsa-card.c\t...",
+                "1\tbluez_output.11_22_33_44_55_66.a2dp-sink\tmodule-bluez5-device.c\t...",
+                "2\tbluez_output.AA_BB_CC_DD_EE_55.a2dp-sink\tmodule-bluez5-device.c\t...",
+            ]
+        )
+        sink = SettingsActions._select_bluetooth_sink(output, "AA_BB_CC_DD_EE_55")
+        self.assertEqual(sink, "bluez_output.AA_BB_CC_DD_EE_55.a2dp-sink")
+
+    def test_set_default_bluetooth_sink_sets_default_and_moves_inputs(self):
+        actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
+
+        def fake_run(command, **kwargs):
+            _ = kwargs
+            if command == ["pactl", "list", "short", "sinks"]:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout="1\tbluez_output.AA_BB_CC_DD_EE_55.a2dp-sink\tmodule-bluez5-device.c\t...\n",
+                    stderr="",
+                )
+            if command == ["pactl", "set-default-sink", "bluez_output.AA_BB_CC_DD_EE_55.a2dp-sink"]:
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            if command == ["pactl", "list", "short", "sink-inputs"]:
+                return subprocess.CompletedProcess(command, 0, stdout="42\t1\t23\t...\n", stderr="")
+            if command == [
+                "pactl",
+                "move-sink-input",
+                "42",
+                "bluez_output.AA_BB_CC_DD_EE_55.a2dp-sink",
+            ]:
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            raise AssertionError(f"Unexpected pactl command: {command}")
+
+        with (
+            mock.patch("settings_actions.shutil.which", return_value="/usr/bin/pactl"),
+            mock.patch("settings_actions.subprocess.run", side_effect=fake_run),
+        ):
+            result = actions._set_default_bluetooth_sink("AA:BB:CC:DD:EE:55")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["sink"], "bluez_output.AA_BB_CC_DD_EE_55.a2dp-sink")
+        self.assertEqual(result["moved_inputs"], 1)
 
 
 class RuntimeSettingsFlowTests(unittest.TestCase):
