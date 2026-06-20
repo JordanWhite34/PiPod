@@ -971,7 +971,7 @@ def _settings_bluetooth_items(bt_status: SettingsActionResult) -> tuple[Settings
         ),
         SettingsItem(
             id="settings:bt_paired",
-            label="Paired Devices",
+            label="Saved Devices",
             kind="action",
             help_text="Connect, disconnect, or forget",
             action="bt_paired",
@@ -1041,9 +1041,9 @@ def _settings_bluetooth_paired_items(result: SettingsActionResult) -> tuple[Sett
         items.append(
             SettingsItem(
                 id="settings:bt_paired_none",
-                label="No paired devices",
+                label="No saved devices",
                 kind="info",
-                help_text="Pair headphones first from scan list",
+                help_text="Scan, pair, or connect headphones first",
             )
         )
     return tuple(items)

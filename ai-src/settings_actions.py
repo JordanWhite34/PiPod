@@ -96,10 +96,7 @@ class SettingsActions:
                 if prep_output is None:
                     return SettingsActionResult(ok=False, message="Bluetooth unavailable")
                 if self._bt_setup_command_failed(command, prep_output):
-                    fallback_devices = self._devices_with_state(
-                        self._list_devices(command="paired-devices"),
-                        paired=True,
-                    )
+                    fallback_devices = self._saved_devices_with_state()
                     return SettingsActionResult(
                         ok=False,
                         message=f"Bluetooth adapter setup failed ({' '.join(command)})",
@@ -116,7 +113,7 @@ class SettingsActions:
             if scan_output is None:
                 return SettingsActionResult(ok=False, message="Bluetooth unavailable")
         except TimeoutError:
-            fallback_devices = self._devices_with_state(self._list_devices(command="paired-devices"), paired=True)
+            fallback_devices = self._saved_devices_with_state()
             return SettingsActionResult(
                 ok=False,
                 message="Bluetooth scan timed out",
@@ -124,7 +121,7 @@ class SettingsActions:
             )
         except Exception as exc:
             logging.warning("Bluetooth scan failed: %s", exc)
-            fallback_devices = self._devices_with_state(self._list_devices(command="paired-devices"), paired=True)
+            fallback_devices = self._saved_devices_with_state()
             return SettingsActionResult(
                 ok=False,
                 message="Bluetooth scan failed",
@@ -133,19 +130,22 @@ class SettingsActions:
 
         raw_discovered_devices = self._parse_scan_discoveries(scan_output)
         discovered_devices = self._named_scan_devices(raw_discovered_devices)
+        known_devices = self._named_scan_devices(self._list_devices(command="devices"))
         paired_devices = self._list_devices(command="paired-devices")
-        merged_devices = self._merge_devices(discovered_devices, paired_devices)
+        merged_devices = self._merge_devices(discovered_devices, known_devices, paired_devices)
         devices = self._devices_with_state(merged_devices)
         nearby_count = len({address for address, _ in discovered_devices})
         raw_nearby_count = len({address for address, _ in raw_discovered_devices})
+        known_count = len({address for address, _ in known_devices})
         paired_count = len({address for address, _ in paired_devices})
         return SettingsActionResult(
             ok=True,
-            message=f"Found {nearby_count} named nearby device(s), {paired_count} paired total",
+            message=f"Found {nearby_count} named nearby, {known_count} known, {paired_count} paired",
             details={
                 "devices": devices,
                 "nearby_count": nearby_count,
                 "raw_nearby_count": raw_nearby_count,
+                "known_count": known_count,
                 "paired_count": paired_count,
             },
         )
@@ -154,10 +154,10 @@ class SettingsActions:
         if shutil.which("bluetoothctl") is None:
             return SettingsActionResult(ok=False, message="Bluetooth unavailable: bluetoothctl missing")
 
-        devices = self._devices_with_state(self._list_devices(command="paired-devices"), paired=True)
+        devices = self._saved_devices_with_state()
         return SettingsActionResult(
             ok=True,
-            message=f"{len(devices)} paired device(s)",
+            message=f"{len(devices)} saved device(s)",
             details={"devices": devices},
         )
 
@@ -187,15 +187,15 @@ class SettingsActions:
         paired = self._parse_bt_flag(info_output, "Paired")
         connected = self._parse_bt_flag(info_output, "Connected")
         trusted = self._parse_bt_flag(info_output, "Trusted")
-        pair_ok = paired or self._pair_succeeded(session_output)
+        pair_ok = paired or trusted or connected or self._pair_succeeded(session_output)
         connect_ok = connected or self._connect_succeeded(session_output)
-        ok = pair_ok and connect_ok
+        ok = connect_ok and pair_ok
         audio_sink_result = self._set_default_bluetooth_sink(address) if ok else {
             "ok": False,
             "message": "Bluetooth not connected",
         }
 
-        if ok and paired:
+        if ok and (paired or trusted or connected):
             message = "Connected headphones"
         elif ok:
             message = "Paired and connected"
@@ -474,7 +474,8 @@ class SettingsActions:
     @staticmethod
     def _merge_devices(
         primary: Iterable[tuple[str, str]],
-        secondary: Iterable[tuple[str, str]],
+        secondary: Iterable[tuple[str, str]] | None = None,
+        *secondary_groups: Iterable[tuple[str, str]],
     ) -> list[tuple[str, str]]:
         merged: dict[str, str] = {}
         order: list[str] = []
@@ -498,7 +499,10 @@ class SettingsActions:
                     merged[normalized_address] = normalized_name
 
         add(primary, prefer_existing=True)
-        add(secondary, prefer_existing=False)
+        if secondary is not None:
+            add(secondary, prefer_existing=False)
+        for secondary in secondary_groups:
+            add(secondary, prefer_existing=False)
         return [(address, merged[address]) for address in order]
 
     @classmethod
@@ -547,6 +551,11 @@ class SettingsActions:
     def _list_devices(self, command: str) -> list[tuple[str, str]]:
         output = self._run_bt([command]) or ""
         return self._parse_devices(output)
+
+    def _saved_devices_with_state(self) -> list[BluetoothDevice]:
+        paired_devices = self._list_devices(command="paired-devices")
+        known_devices = self._named_scan_devices(self._list_devices(command="devices"))
+        return self._devices_with_state(self._merge_devices(paired_devices, known_devices))
 
     def _set_default_bluetooth_sink(self, address: str) -> dict[str, object]:
         if shutil.which("pactl") is None:

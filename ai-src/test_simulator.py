@@ -1422,10 +1422,12 @@ class SettingsActionsTests(unittest.TestCase):
             mock.patch.object(
                 actions,
                 "_list_devices",
-                return_value=[
-                    ("AA:BB:CC:DD:EE:11", "Paired Name"),
-                    ("AA:BB:CC:DD:EE:22", "Paired Only"),
-                ],
+                side_effect=lambda command: [
+                    ("AA:BB:CC:DD:EE:11", "Known Name"),
+                    ("AA:BB:CC:DD:EE:33", "Known Only"),
+                ]
+                if command == "devices"
+                else [("AA:BB:CC:DD:EE:22", "Paired Only")],
             ) as list_devices,
             mock.patch.object(actions, "_devices_with_state", return_value=[]) as with_state,
         ):
@@ -1441,15 +1443,19 @@ class SettingsActionsTests(unittest.TestCase):
             any_order=False,
         )
         run_scan.assert_called_once_with(4)
-        list_devices.assert_called_once_with(command="paired-devices")
+        list_devices.assert_has_calls(
+            [mock.call(command="devices"), mock.call(command="paired-devices")],
+            any_order=False,
+        )
         with_state.assert_called_once_with(
             [
                 ("AA:BB:CC:DD:EE:11", "Nearby Renamed"),
+                ("AA:BB:CC:DD:EE:33", "Known Only"),
                 ("AA:BB:CC:DD:EE:22", "Paired Only"),
             ]
         )
         self.assertTrue(result.ok)
-        self.assertEqual(result.message, "Found 1 named nearby device(s), 2 paired total")
+        self.assertEqual(result.message, "Found 1 named nearby, 2 known, 1 paired")
 
     def test_bluetooth_scan_treats_agent_setup_as_best_effort(self):
         actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
@@ -1478,7 +1484,7 @@ class SettingsActionsTests(unittest.TestCase):
 
         run_scan.assert_called_once_with(4)
         self.assertTrue(result.ok)
-        self.assertEqual(result.message, "Found 1 named nearby device(s), 0 paired total")
+        self.assertEqual(result.message, "Found 1 named nearby, 0 known, 0 paired")
 
     def test_bluetooth_scan_filters_unnamed_discoveries_but_keeps_paired_devices(self):
         actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
@@ -1498,7 +1504,9 @@ class SettingsActionsTests(unittest.TestCase):
             mock.patch.object(
                 actions,
                 "_list_devices",
-                return_value=[("AA:BB:CC:DD:EE:11", "Already Paired")],
+                side_effect=lambda command: [("AA:BB:CC:DD:EE:55", "Known Buds")]
+                if command == "devices"
+                else [("AA:BB:CC:DD:EE:11", "Already Paired")],
             ),
             mock.patch.object(actions, "_devices_with_state", return_value=[]) as with_state,
         ):
@@ -1507,13 +1515,47 @@ class SettingsActionsTests(unittest.TestCase):
         with_state.assert_called_once_with(
             [
                 ("AA:BB:CC:DD:EE:33", "Named Headphones"),
+                ("AA:BB:CC:DD:EE:55", "Known Buds"),
                 ("AA:BB:CC:DD:EE:11", "Already Paired"),
             ]
         )
         self.assertTrue(result.ok)
         self.assertEqual(result.details["nearby_count"], 1)
         self.assertEqual(result.details["raw_nearby_count"], 4)
-        self.assertEqual(result.message, "Found 1 named nearby device(s), 1 paired total")
+        self.assertEqual(result.details["known_count"], 1)
+        self.assertEqual(result.message, "Found 1 named nearby, 1 known, 1 paired")
+
+    def test_bluetooth_saved_devices_include_named_known_devices_when_paired_list_is_empty(self):
+        actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
+        known_device = BluetoothDevice(
+            address="90:9C:4A:E6:E7:F2",
+            name="Trusted Headphones",
+            paired=False,
+            connected=True,
+            trusted=True,
+        )
+
+        with (
+            mock.patch("settings_actions.shutil.which", return_value="/usr/bin/bluetoothctl"),
+            mock.patch.object(
+                actions,
+                "_list_devices",
+                side_effect=lambda command: [("90:9C:4A:E6:E7:F2", "Trusted Headphones")]
+                if command == "devices"
+                else [],
+            ) as list_devices,
+            mock.patch.object(actions, "_devices_with_state", return_value=[known_device]) as with_state,
+        ):
+            result = actions.bluetooth_paired_devices()
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.message, "1 saved device(s)")
+        self.assertEqual(result.details["devices"], [known_device])
+        list_devices.assert_has_calls(
+            [mock.call(command="paired-devices"), mock.call(command="devices")],
+            any_order=False,
+        )
+        with_state.assert_called_once_with([("90:9C:4A:E6:E7:F2", "Trusted Headphones")])
 
     def test_bluetooth_scan_timeout_returns_error_with_paired_fallback(self):
         actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
@@ -1589,6 +1631,43 @@ class SettingsActionsTests(unittest.TestCase):
         run_bt.assert_called_once_with(["info", "AA:BB:CC:DD:EE:44"])
         set_sink.assert_called_once_with("AA:BB:CC:DD:EE:44")
         self.assertTrue(result.details["audio_sink"]["ok"])
+
+    def test_bluetooth_pair_connect_accepts_trusted_connected_device_even_when_not_paired(self):
+        actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
+        session_output = "\n".join(
+            [
+                "Failed to pair: org.bluez.Error.AuthenticationFailed",
+                "Changing 90:9C:4A:E6:E7:F2 trust succeeded",
+                "Connection successful",
+            ]
+        )
+        info_output = "\n".join(
+            [
+                "Device 90:9C:4A:E6:E7:F2",
+                "Paired: no",
+                "Trusted: yes",
+                "Connected: yes",
+            ]
+        )
+
+        with (
+            mock.patch("settings_actions.shutil.which", return_value="/usr/bin/bluetoothctl"),
+            mock.patch.object(actions, "_run_bt_session", return_value=session_output),
+            mock.patch.object(actions, "_run_bt", return_value=info_output),
+            mock.patch.object(
+                actions,
+                "_set_default_bluetooth_sink",
+                return_value={"ok": True, "sink": "bluez_output.90_9C_4A_E6_E7_F2.a2dp-sink"},
+            ) as set_sink,
+        ):
+            result = actions.bluetooth_pair_connect("90:9c:4a:e6:e7:f2")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.message, "Connected headphones")
+        self.assertFalse(result.details["paired"])
+        self.assertTrue(result.details["trusted"])
+        self.assertTrue(result.details["connected"])
+        set_sink.assert_called_once_with("90:9C:4A:E6:E7:F2")
 
     def test_bluetooth_connect_powers_adapter_and_accepts_already_connected(self):
         actions = SettingsActions(music_dir=Path("/tmp/music"), scan_seconds=6)
